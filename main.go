@@ -1,30 +1,23 @@
 /*
-A Go program for linguistic analysis of English text files.
+   TextLinguisticAnalyzer: A Go program for linguistic analysis of English text files.
 
-Features:
+   Features:
+   - Automatically outputs results to a directory named after the input file name (without extension).
+   - Ensures `_all.txt` includes only deduplicated words from the category files.
+   - Enforces exclusivity so every word appears in only one category file.
+   - Words in `_all.txt` appear in decreasing order of global frequency.
+   - Uses the input file name as a prefix for all output files.
+   - Handles slash-separated words as separate entries (e.g., "Writer/Copywriter").
+   - Filters non-English text, deduplicates entries, and sorts by frequency.
+   - Categorizes words by parts of speech and linguistic function.
+   - Capitalizes the first letter of each word for readability.
+   - Optionally waits for user confirmation or delays program exit.
 
-Automatically outputs results to "ewClassifier_output" directory
-
-Categorizes words by parts of speech (nouns, verbs, adjectives, adverbs)
-
-Extracts phrases (noun phrases, verb phrases, idioms, slang, common phrases)
-
-Filters non-English text, deduplicates entries, and sorts by frequency
-
-Capitalizes first letter of each word for readability
-
-Outputs to separate category files (Nouns.txt, Verbs.txt, etc.)
-
-Workflow:
-
-User selects input text file via GUI dialog
-
-Text is processed using prose NLP library for POS tagging
-
-Words and phrases are categorized, counted, and sorted
-
-Results are automatically written to the output directory
-
+   Workflow:
+   - User selects input text file via GUI dialog.
+   - Text is processed using the Prose NLP library for POS tagging.
+   - Results are written to output files in the directory named after the input file name.
+   - User can confirm the results via an "OK" button, or the program will delay for 3 seconds before exiting.
 */
 
 package main
@@ -36,6 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jdkato/prose/v2"
@@ -45,11 +39,9 @@ import (
 // Helper function to check if text contains only valid English characters
 func isEnglishText(text string) bool {
 	for _, r := range text {
-		// Only allow Latin characters, spaces, and hyphens
-		if !unicode.IsLetter(r) && r != ' ' && r != '-' {
+		if !unicode.IsLetter(r) && r != ' ' && r != '-' && r != '/' {
 			return false
 		}
-		// Ensure the character is part of the Latin script range
 		if !unicode.In(r, unicode.Latin) {
 			return false
 		}
@@ -66,6 +58,15 @@ func capitalizePhrase(phrase string) string {
 	return strings.Join(words, " ")
 }
 
+// Splits slash-separated words (e.g., "Writer/Copywriter") into individual words
+func splitSlashSeparatedWords(text string) []string {
+	parts := strings.Split(text, "/")
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
+}
+
 // Deduplicates and counts frequencies of items
 func countFrequencies(content []string) map[string]int {
 	counts := make(map[string]int)
@@ -76,7 +77,7 @@ func countFrequencies(content []string) map[string]int {
 	return counts
 }
 
-// Converts frequency map to sorted slice (only items, sorted by frequency)
+// Converts frequency map to a slice sorted by frequency (descending order)
 func sortByFrequency(counts map[string]int) []string {
 	type itemFrequency struct {
 		Item      string
@@ -86,11 +87,9 @@ func sortByFrequency(counts map[string]int) []string {
 	for item, freq := range counts {
 		items = append(items, itemFrequency{Item: item, Frequency: freq})
 	}
-	// Sort by frequency in descending order
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Frequency > items[j].Frequency
 	})
-	// Return only the items in sorted order
 	var sortedItems []string
 	for _, entry := range items {
 		sortedItems = append(sortedItems, entry.Item)
@@ -98,24 +97,25 @@ func sortByFrequency(counts map[string]int) []string {
 	return sortedItems
 }
 
-// Categorizes text based on linguistic features and skips non-English characters
-func categorizeText(inputFile string) error {
-	// Define the output directory
-	outputDir := "ewClassifier_output"
+// Corrected categorizeText function without the unused prioritizedCategories variable
 
-	// Create the output directory if it does not exist
+func categorizeText(inputFile string) error {
+	baseFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
+	outputDir := baseFileName
+
+	// Create the output directory
 	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	// Open the input file for reading
+	// Open the input file
 	file, err := os.Open(inputFile)
 	if err != nil {
 		return fmt.Errorf("failed to open input file: %v", err)
 	}
 	defer file.Close()
 
-	// Read the content of the input file
+	// Read the content
 	scanner := bufio.NewScanner(file)
 	var content string
 	for scanner.Scan() {
@@ -125,89 +125,60 @@ func categorizeText(inputFile string) error {
 		return fmt.Errorf("error reading input file: %v", err)
 	}
 
-	// Create a Prose document for NLP processing
+	// Create NLP document
 	doc, err := prose.NewDocument(content)
 	if err != nil {
 		return fmt.Errorf("error creating Prose document: %v", err)
 	}
 
-	// Mapping categories to filenames
+	// Define output files
 	categoryFiles := map[string]string{
-		"Nouns":         "Nouns.txt",
-		"Verbs":         "Verbs.txt",
-		"Adjectives":    "Adjectives.txt",
-		"Adverbs":       "Adverbs.txt",
-		"NounPhrases":   "NounPhrases.txt",
-		"VerbPhrases":   "VerbPhrases.txt",
-		"Idioms":        "Idioms.txt",
-		"Slang":         "Slang.txt",
-		"CommonPhrases": "CommonPhrases.txt",
-		"OtherWords":    "OtherWords.txt",
+		"Nouns":      baseFileName + "_Nouns.txt",
+		"Verbs":      baseFileName + "_Verbs.txt",
+		"Adjectives": baseFileName + "_Adjectives.txt",
+		"Adverbs":    baseFileName + "_Adverbs.txt",
+		"OtherWords": baseFileName + "_OtherWords.txt",
 	}
 
-	// Sample datasets for idioms, slang, and common phrases
-	idioms := []string{"piece of cake", "spill the beans", "hit the nail on the head"}
-	slang := []string{"cool", "kick the bucket", "off the hook"}
-	commonPhrases := []string{"good morning", "how are you", "have a nice day"}
+	categorizedWords := make(map[string]string) // Keeps track of which category a word belongs to
+	categorizedContent := make(map[string][]string)
+	allWords := make(map[string]int) // Deduplicated global count for all words
 
-	// Prepare storage for categorized content
-	results := make(map[string][]string)
-
-	// Process each token in the document for single-word POS tagging
-	for _, tok := range doc.Tokens() {
-		text := strings.ToLower(tok.Text) // Normalize input text to lowercase
-
-		// Skip non-English text (e.g., Chinese characters)
-		if isEnglishText(text) {
-			switch tok.Tag {
-			case "NN", "NNS", "NNP", "NNPS":
-				results["Nouns"] = append(results["Nouns"], text)
-			case "VB", "VBD", "VBP", "VBZ", "VBG":
-				results["Verbs"] = append(results["Verbs"], text)
-			case "JJ", "JJR", "JJS":
-				results["Adjectives"] = append(results["Adjectives"], text)
-			case "RB", "RBR", "RBS":
-				results["Adverbs"] = append(results["Adverbs"], text)
-			default:
-				results["OtherWords"] = append(results["OtherWords"], text)
-			}
-		}
-	}
-
-	// Categorize idioms, slang, and common phrases
+	// Process tokens for classification
 	for _, tok := range doc.Tokens() {
 		text := strings.ToLower(tok.Text)
 
-		// Skip non-English text
-		if isEnglishText(text) {
-			if matchesPhraseList(text, idioms) {
-				results["Idioms"] = append(results["Idioms"], text)
-			} else if matchesPhraseList(text, slang) {
-				results["Slang"] = append(results["Slang"], text)
-			} else if matchesPhraseList(text, commonPhrases) {
-				results["CommonPhrases"] = append(results["CommonPhrases"], text)
+		// Process slash-separated words
+		wordParts := splitSlashSeparatedWords(text)
+		for _, part := range wordParts {
+			if isEnglishText(part) {
+				allWords[part]++
+				if _, alreadyCategorized := categorizedWords[part]; !alreadyCategorized {
+					switch tok.Tag {
+					case "NN", "NNS", "NNP", "NNPS":
+						categorizedWords[part] = "Nouns"
+						categorizedContent["Nouns"] = append(categorizedContent["Nouns"], part)
+					case "VB", "VBD", "VBP", "VBZ", "VBG":
+						categorizedWords[part] = "Verbs"
+						categorizedContent["Verbs"] = append(categorizedContent["Verbs"], part)
+					case "JJ", "JJR", "JJS":
+						categorizedWords[part] = "Adjectives"
+						categorizedContent["Adjectives"] = append(categorizedContent["Adjectives"], part)
+					case "RB", "RBR", "RBS":
+						categorizedWords[part] = "Adverbs"
+						categorizedContent["Adverbs"] = append(categorizedContent["Adverbs"], part)
+					default:
+						categorizedWords[part] = "OtherWords"
+						categorizedContent["OtherWords"] = append(categorizedContent["OtherWords"], part)
+					}
+				}
 			}
 		}
 	}
 
-	// Extract noun phrases based on POS patterns
-	for _, chunk := range doc.Entities() {
-		if isEnglishText(chunk.Text) {
-			if chunk.Label == "NP" {
-				results["NounPhrases"] = append(results["NounPhrases"], chunk.Text)
-			}
-		}
-	}
-
-	// Extract verb phrases
-	for _, tok := range doc.Tokens() {
-		if isEnglishText(tok.Text) && strings.HasPrefix(tok.Tag, "VB") {
-			results["VerbPhrases"] = append(results["VerbPhrases"], tok.Text)
-		}
-	}
-
-	// Write output files for each linguistic category, sorted by frequency
-	for category, filename := range categoryFiles {
+	// Write categorized content to respective files
+	for category, words := range categorizedContent {
+		filename := categoryFiles[category]
 		filePath := filepath.Join(outputDir, filename)
 		file, err := os.Create(filePath)
 		if err != nil {
@@ -216,30 +187,38 @@ func categorizeText(inputFile string) error {
 		defer file.Close()
 
 		writer := bufio.NewWriter(file)
-		countedContent := countFrequencies(results[category])
+		countedContent := countFrequencies(words)
 		sortedContent := sortByFrequency(countedContent)
-		// Write items to the file without frequency numbers
 		for _, item := range sortedContent {
 			writer.WriteString(item + "\n")
 		}
 		writer.Flush()
 	}
 
+	// Write `_AllWords.txt` file
+	allFilePath := filepath.Join(outputDir, baseFileName+"_AllWords.txt")
+	allFile, err := os.Create(allFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create unified all.txt file: %v", err)
+	}
+	defer allFile.Close()
+
+	allWriter := bufio.NewWriter(allFile)
+	sortedAllWords := sortByFrequency(allWords)
+	for _, word := range sortedAllWords {
+		allWriter.WriteString(capitalizePhrase(word) + "\n")
+	}
+	allWriter.Flush()
+
+	// Report results
+	fmt.Printf("\n===== Analysis Results =====\n")
+	fmt.Printf("Total unique words after deduplication: %d\n", len(allWords))
+	fmt.Printf("Results written to directory: %s\n", outputDir)
+
 	return nil
 }
 
-// Matches phrases from a list
-func matchesPhraseList(phrase string, list []string) bool {
-	for _, item := range list {
-		if strings.EqualFold(item, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
 func main() {
-	// Let user select input file via dialog
 	fmt.Println("Select the input text file:")
 	inputFile, err := dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
 	if err != nil || inputFile == "" {
@@ -247,12 +226,17 @@ func main() {
 		return
 	}
 
-	// Perform categorization
 	err = categorizeText(inputFile)
 	if err != nil {
 		fmt.Println("Error during categorization:", err)
 		return
 	}
 
-	fmt.Println("Text has been categorized and written to output files.")
+	fmt.Println("Text analysis complete.")
+
+	// Wait for user confirmation
+	dialog.Message("Analysis complete. Click 'OK' to exit.").Title("Analysis Results").Info()
+
+	// Fallback: Sleep for 3 seconds before exiting (in case the GUI doesn't support dialog input)
+	time.Sleep(3 * time.Second)
 }
