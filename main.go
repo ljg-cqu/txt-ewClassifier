@@ -1,34 +1,32 @@
 /*
-	TextLinguisticAnalyzer: A Go program for linguistic analysis of English text files.
+A Go program for linguistic analysis of English text files.
 
 Features:
 
-Categorizes words by parts of speech: nouns, verbs, adjectives, adverbs
+Automatically outputs results to "ewClassifier_output" directory
 
-Extracts and identifies phrases: noun phrases, verb phrases, idioms, slang, common phrases
+Categorizes words by parts of speech (nouns, verbs, adjectives, adverbs)
 
-# Filters out non-English text automatically
+Extracts phrases (noun phrases, verb phrases, idioms, slang, common phrases)
 
-# Deduplicates entries and sorts by frequency of occurrence
+Filters non-English text, deduplicates entries, and sorts by frequency
 
-# Capitalizes first letter of each word for readability
+Capitalizes first letter of each word for readability
 
-# Outputs results to separate category files
+Outputs to separate category files (Nouns.txt, Verbs.txt, etc.)
 
 Workflow:
 
-# User selects input text file and output directory via GUI dialog
+User selects input text file via GUI dialog
 
-# Program processes text using the prose NLP library for POS tagging
+Text is processed using prose NLP library for POS tagging
 
-# Words and phrases are categorized based on linguistic properties
+Words and phrases are categorized, counted, and sorted
 
-# Program counts frequency, deduplicates, and sorts items
+Results are automatically written to the output directory
 
-Results are written to separate files (e.g., Nouns.txt, Verbs.txt, Idioms.txt)
-
-Each output file contains items sorted by occurrence frequency
 */
+
 package main
 
 import (
@@ -101,7 +99,15 @@ func sortByFrequency(counts map[string]int) []string {
 }
 
 // Categorizes text based on linguistic features and skips non-English characters
-func categorizeText(inputFile string, outputDir string) error {
+func categorizeText(inputFile string) error {
+	// Define the output directory
+	outputDir := "ewClassifier_output"
+
+	// Create the output directory if it does not exist
+	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create output directory: %v", err)
+	}
+
 	// Open the input file for reading
 	file, err := os.Open(inputFile)
 	if err != nil {
@@ -241,16 +247,8 @@ func main() {
 		return
 	}
 
-	// Let user select output directory via dialog
-	fmt.Println("Select the output directory:")
-	outputDir, err := dialog.Directory().Title("Select Output Directory").Browse()
-	if err != nil || outputDir == "" {
-		fmt.Println("No directory selected or error occurred:", err)
-		return
-	}
-
 	// Perform categorization
-	err = categorizeText(inputFile, outputDir)
+	err = categorizeText(inputFile)
 	if err != nil {
 		fmt.Println("Error during categorization:", err)
 		return
