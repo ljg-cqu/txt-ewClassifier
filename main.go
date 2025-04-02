@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jdkato/prose/v2"
@@ -24,6 +27,12 @@ type OutputConfig struct {
 	IncludeSynonyms bool `yaml:"includeSynonyms"`
 	IncludeAntonyms bool `yaml:"includeAntonyms"`
 	FilterNoExample bool `yaml:"filterDefinitionsWithoutExamples"`
+}
+
+// Proxy configuration structure
+type ProxyConfig struct {
+	HTTPProxy  string `yaml:"httpProxy"`
+	HTTPSProxy string `yaml:"httpsProxy"`
 }
 
 // Cache structure to store API responses
@@ -46,8 +55,10 @@ type Definition struct {
 
 // Global variables for configuration and cache
 var config OutputConfig
+var proxyConfig ProxyConfig
 var wordCache map[string]WordCache = make(map[string]WordCache)
 var cachePath string = "word_cache.json"
+var logFile *os.File
 
 // Helper function to verify English text validity
 func isEnglishText(text string) bool {
@@ -128,12 +139,12 @@ func loadConfig() OutputConfig {
 		// Create default config file if it doesn't exist
 		yamlData, err := yaml.Marshal(defaultConfig)
 		if err != nil {
-			fmt.Println("Error creating default config:", err)
+			log.Println("Error creating default config:", err)
 			return defaultConfig
 		}
 		err = ioutil.WriteFile(configPath, yamlData, 0644)
 		if err != nil {
-			fmt.Println("Error writing default config file:", err)
+			log.Println("Error writing default config file:", err)
 		}
 		return defaultConfig
 	}
@@ -141,15 +152,64 @@ func loadConfig() OutputConfig {
 	// Read and parse config file
 	yamlFile, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		fmt.Printf("Error reading config file: %v. Using defaults.\n", err)
+		log.Printf("Error reading config file: %v. Using defaults.\n", err)
 		return defaultConfig
 	}
 
 	var config OutputConfig
 	err = yaml.Unmarshal(yamlFile, &config)
 	if err != nil {
-		fmt.Printf("Error parsing config file: %v. Using defaults.\n", err)
+		log.Printf("Error parsing config file: %v. Using defaults.\n", err)
 		return defaultConfig
+	}
+
+	return config
+}
+
+// Load proxy configuration from YAML file
+func loadProxyConfig() ProxyConfig {
+	defaultConfig := ProxyConfig{
+		HTTPProxy:  "",
+		HTTPSProxy: "",
+	}
+
+	// Check if config file exists
+	configPath := "proxy.yml"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Create default config file if it doesn't exist
+		yamlData, err := yaml.Marshal(defaultConfig)
+		if err != nil {
+			log.Println("Error creating default proxy config:", err)
+			return defaultConfig
+		}
+		err = ioutil.WriteFile(configPath, yamlData, 0644)
+		if err != nil {
+			log.Println("Error writing default proxy config file:", err)
+		}
+		log.Println("Created default proxy.yml file. Please configure your proxy settings there if needed.")
+		return defaultConfig
+	}
+
+	// Read and parse config file
+	yamlFile, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		log.Printf("Error reading proxy config file: %v. Using no proxy.\n", err)
+		return defaultConfig
+	}
+
+	var config ProxyConfig
+	err = yaml.Unmarshal(yamlFile, &config)
+	if err != nil {
+		log.Printf("Error parsing proxy config file: %v. Using no proxy.\n", err)
+		return defaultConfig
+	}
+
+	if config.HTTPProxy != "" || config.HTTPSProxy != "" {
+		log.Println("Proxy configuration loaded successfully.")
+		log.Printf("HTTP Proxy: %s\n", config.HTTPProxy)
+		log.Printf("HTTPS Proxy: %s\n", config.HTTPSProxy)
+	} else {
+		log.Println("No proxy configuration found. API requests will be made directly.")
 	}
 
 	return config
@@ -163,13 +223,13 @@ func loadWordCache() {
 
 	data, err := ioutil.ReadFile(cachePath)
 	if err != nil {
-		fmt.Println("Error reading cache file:", err)
+		log.Println("Error reading cache file:", err)
 		return
 	}
 
 	err = json.Unmarshal(data, &wordCache)
 	if err != nil {
-		fmt.Println("Error parsing cache file:", err)
+		log.Println("Error parsing cache file:", err)
 		wordCache = make(map[string]WordCache)
 	}
 }
@@ -178,13 +238,13 @@ func loadWordCache() {
 func saveWordCache() {
 	data, err := json.MarshalIndent(wordCache, "", "  ")
 	if err != nil {
-		fmt.Println("Error serializing cache:", err)
+		log.Println("Error serializing cache:", err)
 		return
 	}
 
 	err = ioutil.WriteFile(cachePath, data, 0644)
 	if err != nil {
-		fmt.Println("Error writing cache file:", err)
+		log.Println("Error writing cache file:", err)
 	}
 }
 
@@ -202,6 +262,35 @@ func formatWordList(words []string) string {
 	return strings.Join(words, ", ")
 }
 
+// Create an HTTP client with proxy support if configured
+func createHTTPClient() (*http.Client, error) {
+	transport := &http.Transport{}
+
+	// Check if we have proxy configuration
+	if proxyConfig.HTTPSProxy != "" {
+		proxyURL, err := url.Parse(proxyConfig.HTTPSProxy)
+		if err != nil {
+			log.Printf("Error parsing HTTPS proxy URL: %v. Will try without proxy.\n", err)
+		} else {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			log.Printf("Using HTTPS proxy: %s\n", proxyConfig.HTTPSProxy)
+		}
+	} else if proxyConfig.HTTPProxy != "" {
+		proxyURL, err := url.Parse(proxyConfig.HTTPProxy)
+		if err != nil {
+			log.Printf("Error parsing HTTP proxy URL: %v. Will try without proxy.\n", err)
+		} else {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			log.Printf("Using HTTP proxy: %s\n", proxyConfig.HTTPProxy)
+		}
+	}
+
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: transport,
+	}, nil
+}
+
 // Fetch word explanations using the Free Dictionary API
 func fetchWordDetails(word string) string {
 	// Check cache first
@@ -209,14 +298,61 @@ func fetchWordDetails(word string) string {
 	if !exists {
 		// Fetch from API if not in cache
 		url := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", strings.ToLower(word))
-		resp, err := http.Get(url)
+		log.Printf("Fetching word '%s' from URL: %s\n", word, url)
+
+		// Create a new request with proper headers
+		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
+			log.Printf("Error creating request for %s: %v\n", word, err)
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+
+		// Add headers that might help with the request
+		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Add("Accept", "application/json")
+
+		// Create HTTP client with proxy support if configured
+		client, err := createHTTPClient()
+		if err != nil {
+			log.Printf("Error creating HTTP client: %v. Will use default client.\n", err)
+			client = &http.Client{Timeout: 10 * time.Second}
+		}
+
+		// Send the request
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Printf("Network error when fetching %s: %v\n", word, err)
 			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
 		}
 		defer resp.Body.Close()
 
+		// Read the full response body for debugging
+		bodyBytes, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("Error reading response body for %s: %v\n", word, err)
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+
+		// Log response details
+		log.Printf("Response status for '%s': %s\n", word, resp.Status)
+		log.Printf("Response body for '%s': %s\n", word, string(bodyBytes))
+
+		// Check if response status code is successful (200 OK)
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("API returned non-OK status code %d for word %s\n", resp.StatusCode, word)
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+
+		// Create a new reader with the body bytes for JSON decoding
 		var result []map[string]interface{}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			log.Printf("Error parsing JSON for %s: %v\n", word, err)
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+
+		// Check if the result is empty or doesn't contain expected data
+		if len(result) == 0 {
+			log.Printf("Empty result array for word %s\n", word)
 			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
 		}
 
@@ -230,37 +366,44 @@ func fetchWordDetails(word string) string {
 		}
 
 		// Extract phonetic if available
-		if len(result) > 0 {
-			if phonetic, ok := result[0]["phonetic"].(string); ok {
-				cachedData.Phonetic = phonetic
-			}
+		if phonetic, ok := result[0]["phonetic"].(string); ok {
+			cachedData.Phonetic = phonetic
+		}
 
-			// Try to find phonetics array if direct phonetic field is empty
-			if cachedData.Phonetic == "" {
-				if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && len(phonetics) > 0 {
-					for _, p := range phonetics {
-						if phoneticMap, ok := p.(map[string]interface{}); ok {
-							if text, ok := phoneticMap["text"].(string); ok && text != "" {
-								cachedData.Phonetic = text
-								break
-							}
+		// Try to find phonetics array if direct phonetic field is empty
+		if cachedData.Phonetic == "" {
+			if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && len(phonetics) > 0 {
+				for _, p := range phonetics {
+					if phoneticMap, ok := p.(map[string]interface{}); ok {
+						if text, ok := phoneticMap["text"].(string); ok && text != "" {
+							cachedData.Phonetic = text
+							break
 						}
 					}
 				}
 			}
+		}
 
-			// Extract origin if available
-			if origin, ok := result[0]["origin"].(string); ok {
-				cachedData.Origin = origin
-			}
+		// Extract origin if available
+		if origin, ok := result[0]["origin"].(string); ok {
+			cachedData.Origin = origin
 		}
 
 		// Process all definitions
 		for _, entry := range result {
 			if meanings, ok := entry["meanings"].([]interface{}); ok {
 				for _, meaning := range meanings {
-					meaningMap := meaning.(map[string]interface{})
-					partOfSpeech := meaningMap["partOfSpeech"].(string)
+					meaningMap, ok := meaning.(map[string]interface{})
+					if !ok {
+						log.Printf("Warning: meaning is not a map for word %s\n", word)
+						continue
+					}
+
+					partOfSpeech, ok := meaningMap["partOfSpeech"].(string)
+					if !ok {
+						log.Printf("Warning: partOfSpeech not found for word %s\n", word)
+						continue
+					}
 
 					// Extract synonyms and antonyms at the meaning level
 					var meaningLevelSynonyms, meaningLevelAntonyms []string
@@ -285,8 +428,15 @@ func fetchWordDetails(word string) string {
 					// Process definitions
 					if definitions, ok := meaningMap["definitions"].([]interface{}); ok {
 						for _, def := range definitions {
-							defMap := def.(map[string]interface{})
-							definitionText := defMap["definition"].(string)
+							defMap, ok := def.(map[string]interface{})
+							if !ok {
+								continue
+							}
+
+							definitionText, ok := defMap["definition"].(string)
+							if !ok {
+								continue
+							}
 
 							// Extract example if available
 							example := ""
@@ -388,9 +538,27 @@ func fetchWordDetails(word string) string {
 	return details.String()
 }
 
+// Sets up logging to write to a log file
+func setupLogging() {
+	// Create or open log file
+	var err error
+	logFile, err = os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		fmt.Println("Failed to open log file:", err)
+		return
+	}
+
+	// Configure log package to write to the file
+	log.SetOutput(logFile)
+	log.SetFlags(log.LstdFlags)
+}
+
 // Prints dynamic progress monitoring info with clear formatting
 func printProgress(stage string, item string, current, total int) {
 	percentage := int((float64(current) / float64(total)) * 100)
+	// Log progress to file
+	log.Printf("%s: %s (%d of %d) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
+
 	// Clear the entire line before printing new progress
 	fmt.Printf("\r%-80s", " ") // Clear previous content with spaces
 	fmt.Printf("\r%s: %s (%d of %d) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
@@ -449,7 +617,7 @@ func categorizeText(inputFile string) error {
 	// Process tokens for classification
 	tokens := doc.Tokens()
 	totalTokens := len(tokens)
-	fmt.Println("Starting text classification...")
+	log.Println("Starting text classification...")
 
 	for i, tok := range tokens {
 		text := strings.ToLower(tok.Text)
@@ -478,6 +646,7 @@ func categorizeText(inputFile string) error {
 		}
 	}
 
+	log.Println("\nClassification complete. Starting dictionary lookups...")
 	fmt.Println("\nClassification complete. Starting dictionary lookups...")
 
 	// Get all unique words for total word count display
@@ -513,6 +682,7 @@ func categorizeText(inputFile string) error {
 
 		sortedWords := sortByFrequency(countFrequencies(words))
 
+		log.Printf("\nProcessing %s category (%d words):\n", category, len(sortedWords))
 		fmt.Printf("\nProcessing %s category (%d words):\n", category, len(sortedWords))
 
 		for i, word := range sortedWords {
@@ -527,9 +697,11 @@ func categorizeText(inputFile string) error {
 		}
 		wordWriter.Flush()
 		exWriter.Flush()
+		log.Printf("\n- Category '%s' processed: %d words\n", category, len(sortedWords))
 		fmt.Printf("\n- Category '%s' processed: %d words\n", category, len(sortedWords))
 	}
 
+	log.Println("\nGenerating final outputs...")
 	fmt.Println("\nGenerating final outputs...")
 
 	// Write `_AllWords_ex.txt` file
@@ -546,6 +718,7 @@ func categorizeText(inputFile string) error {
 		allWordsExWriter.WriteString(fetchWordDetails(word) + "\n")
 	}
 	allWordsExWriter.Flush()
+	log.Println("\n- AllWords_ex.txt complete")
 	fmt.Println("\n- AllWords_ex.txt complete")
 
 	// Write `_AllWords.txt` file
@@ -561,34 +734,50 @@ func categorizeText(inputFile string) error {
 		allWordsWriter.WriteString(capitalizePhrase(word) + "\n")
 	}
 	allWordsWriter.Flush()
+	log.Println("- AllWords.txt complete")
 	fmt.Println("- AllWords.txt complete")
 
 	// Report results
+	log.Printf("\n===== Analysis Results =====\n")
+	log.Printf("Total unique words after deduplication: %d\n", totalUniqueWords)
+	log.Printf("Results written to directory: %s\n", outputDir)
+
 	fmt.Printf("\n===== Analysis Results =====\n")
 	fmt.Printf("Total unique words after deduplication: %d\n", totalUniqueWords)
 	fmt.Printf("Results written to directory: %s\n", outputDir)
+	log.Println("Text analysis complete.")
 
 	return nil
 }
 
 func main() {
-	// Load configuration and word cache
+	// Setup logging
+	setupLogging()
+	defer logFile.Close()
+
+	log.Println("Application started")
+
+	// Load configuration and proxy settings
 	config = loadConfig()
+	proxyConfig = loadProxyConfig()
 	loadWordCache()
 
+	log.Println("Select the input text file:")
 	fmt.Println("Select the input text file:")
 	inputFile, err := dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
 	if err != nil || inputFile == "" {
+		log.Println("No file selected or error occurred.")
 		fmt.Println("No file selected or error occurred.")
 		return
 	}
 
 	err = categorizeText(inputFile)
 	if err != nil {
+		log.Println("Error during categorization:", err)
 		fmt.Println("Error during categorization:", err)
 		return
 	}
 
-	// Display confirmation dialog for completion
-	dialog.Message("Text analysis complete. Click 'OK' to exit.").Title("Analysis Results").Info()
+	log.Println("Text analysis complete.")
+	fmt.Println("Text analysis complete.")
 }
