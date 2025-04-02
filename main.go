@@ -20,7 +20,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// Configuration structure for output options
+// Configuration structures
 type OutputConfig struct {
 	IncludePhonetic bool `yaml:"includePhonetic"`
 	IncludeOrigin   bool `yaml:"includeOrigin"`
@@ -29,22 +29,11 @@ type OutputConfig struct {
 	FilterNoExample bool `yaml:"filterDefinitionsWithoutExamples"`
 }
 
-// Proxy configuration structure
 type ProxyConfig struct {
 	HTTPProxy  string `yaml:"httpProxy"`
 	HTTPSProxy string `yaml:"httpsProxy"`
 }
 
-// Cache structure to store API responses
-type WordCache struct {
-	Definitions []Definition
-	Phonetic    string
-	Origin      string
-	Synonyms    []string
-	Antonyms    []string
-}
-
-// Definition structure to store word definitions
 type Definition struct {
 	PartOfSpeech string
 	Definition   string
@@ -53,14 +42,22 @@ type Definition struct {
 	Antonyms     []string
 }
 
-// Global variables for configuration and cache
+type WordCache struct {
+	Definitions []Definition
+	Phonetic    string
+	Origin      string
+	Synonyms    []string
+	Antonyms    []string
+}
+
+// Global variables
 var config OutputConfig
 var proxyConfig ProxyConfig
-var wordCache map[string]WordCache = make(map[string]WordCache)
-var cachePath string = "word_cache.json"
+var wordCache = make(map[string]WordCache)
+var cachePath = "word_cache.json"
 var logFile *os.File
 
-// Helper function to verify English text validity
+// Helper functions
 func isEnglishText(text string) bool {
 	for _, r := range text {
 		if !unicode.IsLetter(r) && r != ' ' && r != '-' && r != '/' {
@@ -73,7 +70,6 @@ func isEnglishText(text string) bool {
 	return true
 }
 
-// Capitalize the first letter of each word
 func capitalizePhrase(phrase string) string {
 	words := strings.Fields(phrase)
 	for i, word := range words {
@@ -84,7 +80,6 @@ func capitalizePhrase(phrase string) string {
 	return strings.Join(words, " ")
 }
 
-// Split slash-separated words into individual words
 func splitSlashSeparatedWords(text string) []string {
 	parts := strings.Split(text, "/")
 	for i, part := range parts {
@@ -93,37 +88,34 @@ func splitSlashSeparatedWords(text string) []string {
 	return parts
 }
 
-// Count frequencies of items in a list
 func countFrequencies(content []string) map[string]int {
 	counts := make(map[string]int)
 	for _, item := range content {
-		capitalizedItem := capitalizePhrase(item)
-		counts[capitalizedItem]++
+		counts[capitalizePhrase(item)]++
 	}
 	return counts
 }
 
-// Sort items by frequency (descending order)
 func sortByFrequency(counts map[string]int) []string {
-	type itemFrequency struct {
-		Item      string
-		Frequency int
+	type itemFreq struct {
+		Item string
+		Freq int
 	}
-	var items []itemFrequency
+	var items []itemFreq
 	for item, freq := range counts {
-		items = append(items, itemFrequency{Item: item, Frequency: freq})
+		items = append(items, itemFreq{Item: item, Freq: freq})
 	}
 	sort.Slice(items, func(i, j int) bool {
-		return items[i].Frequency > items[j].Frequency
+		return items[i].Freq > items[j].Freq
 	})
-	var sortedItems []string
-	for _, entry := range items {
-		sortedItems = append(sortedItems, entry.Item)
+	var result []string
+	for _, item := range items {
+		result = append(result, item.Item)
 	}
-	return sortedItems
+	return result
 }
 
-// Load configuration from YAML file
+// Configuration loading
 func loadConfig() OutputConfig {
 	defaultConfig := OutputConfig{
 		IncludePhonetic: false,
@@ -133,226 +125,121 @@ func loadConfig() OutputConfig {
 		FilterNoExample: false,
 	}
 
-	// Check if config file exists
 	configPath := "outputConfig.yml"
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Create default config file if it doesn't exist
-		yamlData, err := yaml.Marshal(defaultConfig)
-		if err != nil {
-			log.Println("Error creating default config:", err)
-			return defaultConfig
-		}
-		err = ioutil.WriteFile(configPath, yamlData, 0644)
-		if err != nil {
-			log.Println("Error writing default config file:", err)
-		}
+		yamlData, _ := yaml.Marshal(defaultConfig)
+		ioutil.WriteFile(configPath, yamlData, 0644)
 		return defaultConfig
 	}
 
-	// Read and parse config file
 	yamlFile, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		log.Printf("Error reading config file: %v. Using defaults.\n", err)
 		return defaultConfig
 	}
 
 	var config OutputConfig
-	err = yaml.Unmarshal(yamlFile, &config)
-	if err != nil {
-		log.Printf("Error parsing config file: %v. Using defaults.\n", err)
+	if err := yaml.Unmarshal(yamlFile, &config); err != nil {
 		return defaultConfig
 	}
-
 	return config
 }
 
-// Load proxy configuration from YAML file
 func loadProxyConfig() ProxyConfig {
 	defaultConfig := ProxyConfig{
 		HTTPProxy:  "",
 		HTTPSProxy: "",
 	}
 
-	// Check if config file exists
 	configPath := "proxy.yml"
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Create default config file if it doesn't exist
-		yamlData, err := yaml.Marshal(defaultConfig)
-		if err != nil {
-			log.Println("Error creating default proxy config:", err)
-			return defaultConfig
-		}
-		err = ioutil.WriteFile(configPath, yamlData, 0644)
-		if err != nil {
-			log.Println("Error writing default proxy config file:", err)
-		}
-		log.Println("Created default proxy.yml file. Please configure your proxy settings there if needed.")
+		yamlData, _ := yaml.Marshal(defaultConfig)
+		ioutil.WriteFile(configPath, yamlData, 0644)
 		return defaultConfig
 	}
 
-	// Read and parse config file
 	yamlFile, err := ioutil.ReadFile(configPath)
 	if err != nil {
-		log.Printf("Error reading proxy config file: %v. Using no proxy.\n", err)
 		return defaultConfig
 	}
 
 	var config ProxyConfig
-	err = yaml.Unmarshal(yamlFile, &config)
-	if err != nil {
-		log.Printf("Error parsing proxy config file: %v. Using no proxy.\n", err)
+	if err := yaml.Unmarshal(yamlFile, &config); err != nil {
 		return defaultConfig
 	}
-
-	if config.HTTPProxy != "" || config.HTTPSProxy != "" {
-		log.Println("Proxy configuration loaded successfully.")
-		log.Printf("HTTP Proxy: %s\n", config.HTTPProxy)
-		log.Printf("HTTPS Proxy: %s\n", config.HTTPSProxy)
-	} else {
-		log.Println("No proxy configuration found. API requests will be made directly.")
-	}
-
 	return config
 }
 
-// Load word cache from file
+// Cache management
 func loadWordCache() {
 	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
-		return // No cache file exists yet
+		return
 	}
 
 	data, err := ioutil.ReadFile(cachePath)
 	if err != nil {
-		log.Println("Error reading cache file:", err)
 		return
 	}
 
-	err = json.Unmarshal(data, &wordCache)
-	if err != nil {
-		log.Println("Error parsing cache file:", err)
+	if err := json.Unmarshal(data, &wordCache); err != nil {
 		wordCache = make(map[string]WordCache)
 	}
 }
 
-// Save word cache to file
 func saveWordCache() {
 	data, err := json.MarshalIndent(wordCache, "", "  ")
 	if err != nil {
-		log.Println("Error serializing cache:", err)
 		return
 	}
-
-	err = ioutil.WriteFile(cachePath, data, 0644)
-	if err != nil {
-		log.Println("Error writing cache file:", err)
-	}
+	ioutil.WriteFile(cachePath, data, 0644)
 }
 
-// Check if word exists in cache
-func checkCache(word string) (WordCache, bool) {
-	cached, exists := wordCache[strings.ToLower(word)]
-	return cached, exists
-}
-
-// Format a list of words for output
-func formatWordList(words []string) string {
-	if len(words) == 0 {
-		return ""
-	}
-	return strings.Join(words, ", ")
-}
-
-// Create an HTTP client with proxy support if configured
-func createHTTPClient() (*http.Client, error) {
+func createHTTPClient() *http.Client {
 	transport := &http.Transport{}
 
-	// Check if we have proxy configuration
 	if proxyConfig.HTTPSProxy != "" {
 		proxyURL, err := url.Parse(proxyConfig.HTTPSProxy)
-		if err != nil {
-			log.Printf("Error parsing HTTPS proxy URL: %v. Will try without proxy.\n", err)
-		} else {
+		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
-			log.Printf("Using HTTPS proxy: %s\n", proxyConfig.HTTPSProxy)
 		}
 	} else if proxyConfig.HTTPProxy != "" {
 		proxyURL, err := url.Parse(proxyConfig.HTTPProxy)
-		if err != nil {
-			log.Printf("Error parsing HTTP proxy URL: %v. Will try without proxy.\n", err)
-		} else {
+		if err == nil {
 			transport.Proxy = http.ProxyURL(proxyURL)
-			log.Printf("Using HTTP proxy: %s\n", proxyConfig.HTTPProxy)
 		}
 	}
 
 	return &http.Client{
 		Timeout:   10 * time.Second,
 		Transport: transport,
-	}, nil
+	}
 }
 
-// Fetch word explanations using the Free Dictionary API
 func fetchWordDetails(word string) string {
-	// Check cache first
-	cachedData, exists := checkCache(word)
-	if !exists {
-		// Fetch from API if not in cache
-		url := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", strings.ToLower(word))
-		log.Printf("Fetching word '%s' from URL: %s\n", word, url)
+	word = strings.ToLower(word)
+	cachedData, exists := wordCache[word]
 
-		// Create a new request with proper headers
-		req, err := http.NewRequest("GET", url, nil)
+	if !exists {
+		apiURL := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", word)
+
+		req, err := http.NewRequest("GET", apiURL, nil)
 		if err != nil {
-			log.Printf("Error creating request for %s: %v\n", word, err)
 			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
 		}
 
-		// Add headers that might help with the request
-		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 		req.Header.Add("Accept", "application/json")
 
-		// Create HTTP client with proxy support if configured
-		client, err := createHTTPClient()
-		if err != nil {
-			log.Printf("Error creating HTTP client: %v. Will use default client.\n", err)
-			client = &http.Client{Timeout: 10 * time.Second}
-		}
-
-		// Send the request
+		client := createHTTPClient()
 		resp, err := client.Do(req)
-		if err != nil {
-			log.Printf("Network error when fetching %s: %v\n", word, err)
+		if err != nil || resp.StatusCode != http.StatusOK {
 			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
 		}
 		defer resp.Body.Close()
 
-		// Read the full response body for debugging
-		bodyBytes, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			log.Printf("Error reading response body for %s: %v\n", word, err)
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
 
-		// Log response details
-		log.Printf("Response status for '%s': %s\n", word, resp.Status)
-		log.Printf("Response body for '%s': %s\n", word, string(bodyBytes))
-
-		// Check if response status code is successful (200 OK)
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("API returned non-OK status code %d for word %s\n", resp.StatusCode, word)
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
-
-		// Create a new reader with the body bytes for JSON decoding
 		var result []map[string]interface{}
-		if err := json.Unmarshal(bodyBytes, &result); err != nil {
-			log.Printf("Error parsing JSON for %s: %v\n", word, err)
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
-
-		// Check if the result is empty or doesn't contain expected data
-		if len(result) == 0 {
-			log.Printf("Empty result array for word %s\n", word)
+		if err := json.Unmarshal(bodyBytes, &result); err != nil || len(result) == 0 {
 			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
 		}
 
@@ -370,86 +257,60 @@ func fetchWordDetails(word string) string {
 			cachedData.Phonetic = phonetic
 		}
 
-		// Try to find phonetics array if direct phonetic field is empty
-		if cachedData.Phonetic == "" {
-			if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && len(phonetics) > 0 {
-				for _, p := range phonetics {
-					if phoneticMap, ok := p.(map[string]interface{}); ok {
-						if text, ok := phoneticMap["text"].(string); ok && text != "" {
-							cachedData.Phonetic = text
-							break
-						}
+		// Extract phonetics
+		if phonetics, ok := result[0]["phonetics"].([]interface{}); ok {
+			for _, p := range phonetics {
+				if phoneticMap, ok := p.(map[string]interface{}); ok {
+					if text, ok := phoneticMap["text"].(string); ok && text != "" {
+						cachedData.Phonetic = text
 					}
 				}
 			}
 		}
 
-		// Extract origin if available
-		if origin, ok := result[0]["origin"].(string); ok {
-			cachedData.Origin = origin
+		// Extract origin directly from the top level
+		if originStr, ok := result[0]["origin"].(string); ok {
+			cachedData.Origin = originStr
 		}
 
-		// Process all definitions
-		for _, entry := range result {
-			if meanings, ok := entry["meanings"].([]interface{}); ok {
-				for _, meaning := range meanings {
-					meaningMap, ok := meaning.(map[string]interface{})
-					if !ok {
-						log.Printf("Warning: meaning is not a map for word %s\n", word)
-						continue
+		// Extract meanings, definitions, synonyms, antonyms
+		if meanings, ok := result[0]["meanings"].([]interface{}); ok {
+			for _, m := range meanings {
+				if meaningMap, ok := m.(map[string]interface{}); ok {
+					partOfSpeech := ""
+					if pos, ok := meaningMap["partOfSpeech"].(string); ok {
+						partOfSpeech = pos
 					}
 
-					partOfSpeech, ok := meaningMap["partOfSpeech"].(string)
-					if !ok {
-						log.Printf("Warning: partOfSpeech not found for word %s\n", word)
-						continue
-					}
-
-					// Extract synonyms and antonyms at the meaning level
-					var meaningLevelSynonyms, meaningLevelAntonyms []string
-					if syns, ok := meaningMap["synonyms"].([]interface{}); ok {
-						for _, syn := range syns {
-							if synStr, ok := syn.(string); ok {
-								meaningLevelSynonyms = append(meaningLevelSynonyms, synStr)
-								cachedData.Synonyms = append(cachedData.Synonyms, synStr)
-							}
-						}
-					}
-
-					if ants, ok := meaningMap["antonyms"].([]interface{}); ok {
-						for _, ant := range ants {
-							if antStr, ok := ant.(string); ok {
-								meaningLevelAntonyms = append(meaningLevelAntonyms, antStr)
-								cachedData.Antonyms = append(cachedData.Antonyms, antStr)
-							}
-						}
-					}
-
-					// Process definitions
+					// Extract definitions
 					if definitions, ok := meaningMap["definitions"].([]interface{}); ok {
-						for _, def := range definitions {
-							defMap, ok := def.(map[string]interface{})
+						for _, d := range definitions {
+							defMap, ok := d.(map[string]interface{})
 							if !ok {
 								continue
 							}
 
-							definitionText, ok := defMap["definition"].(string)
-							if !ok {
-								continue
+							def := Definition{
+								PartOfSpeech: partOfSpeech,
+								Definition:   "",
+								Example:      "",
+								Synonyms:     []string{},
+								Antonyms:     []string{},
 							}
 
-							// Extract example if available
-							example := ""
-							if ex, ok := defMap["example"].(string); ok {
-								example = ex
+							if defStr, ok := defMap["definition"].(string); ok {
+								def.Definition = defStr
 							}
 
-							// Extract definition level synonyms and antonyms
-							var defSynonyms, defAntonyms []string
+							if exampleStr, ok := defMap["example"].(string); ok {
+								def.Example = exampleStr
+							}
+
+							// Extract synonyms and antonyms
 							if syns, ok := defMap["synonyms"].([]interface{}); ok {
 								for _, syn := range syns {
 									if synStr, ok := syn.(string); ok {
-										defSynonyms = append(defSynonyms, synStr)
+										def.Synonyms = append(def.Synonyms, synStr)
 										cachedData.Synonyms = append(cachedData.Synonyms, synStr)
 									}
 								}
@@ -458,163 +319,125 @@ func fetchWordDetails(word string) string {
 							if ants, ok := defMap["antonyms"].([]interface{}); ok {
 								for _, ant := range ants {
 									if antStr, ok := ant.(string); ok {
-										defAntonyms = append(defAntonyms, antStr)
+										def.Antonyms = append(def.Antonyms, antStr)
 										cachedData.Antonyms = append(cachedData.Antonyms, antStr)
 									}
 								}
 							}
 
-							// Add definition with combined synonyms and antonyms
-							allSyns := append(defSynonyms, meaningLevelSynonyms...)
-							allAnts := append(defAntonyms, meaningLevelAntonyms...)
-
-							cachedData.Definitions = append(cachedData.Definitions, Definition{
-								PartOfSpeech: partOfSpeech,
-								Definition:   definitionText,
-								Example:      example,
-								Synonyms:     allSyns,
-								Antonyms:     allAnts,
-							})
+							cachedData.Definitions = append(cachedData.Definitions, def)
 						}
 					}
 				}
 			}
 		}
 
-		// Add to cache for future use
+		// Save to cache
 		wordCache[strings.ToLower(word)] = cachedData
-		// Save cache after each new word
 		saveWordCache()
 	}
 
-	// Format the word details based on cached data and configuration
-	var details strings.Builder
+	// Format output
+	var output strings.Builder
+	output.WriteString(fmt.Sprintf("%s\n", capitalizePhrase(word)))
 
-	// Add word name and phonetic (if enabled)
-	capitalized := capitalizePhrase(word)
 	if config.IncludePhonetic && cachedData.Phonetic != "" {
-		details.WriteString(fmt.Sprintf("%s %s\n", capitalized, cachedData.Phonetic))
-	} else {
-		details.WriteString(capitalized + "\n")
+		output.WriteString(fmt.Sprintf("\tPhonetic: %s\n", cachedData.Phonetic))
 	}
 
-	// Add origin if enabled
 	if config.IncludeOrigin && cachedData.Origin != "" {
-		details.WriteString(fmt.Sprintf("\t%s Origin: %s\n", capitalized, cachedData.Origin))
+		output.WriteString(fmt.Sprintf("\tOrigin: %s\n", cachedData.Origin))
 	}
 
-	// If no definitions available, return basic info
 	if len(cachedData.Definitions) == 0 {
-		details.WriteString("\tNo details available.\n")
-		return details.String()
+		output.WriteString("\tNo details available.\n")
+		return output.String()
 	}
 
-	// Process definitions
 	for i, def := range cachedData.Definitions {
-		// Skip definitions without examples if filtering is enabled
 		if config.FilterNoExample && def.Example == "" {
 			continue
 		}
 
-		// Write definition with number
-		details.WriteString(fmt.Sprintf("\t%s %d, %s: %s\n", capitalized, i+1, def.PartOfSpeech, def.Definition))
+		output.WriteString(fmt.Sprintf("\t%d. (%s) %s\n", i+1, def.PartOfSpeech, def.Definition))
 
-		// Add example if available
 		if def.Example != "" {
-			details.WriteString(fmt.Sprintf("\t\t%s %d Example: %s\n", capitalized, i+1, def.Example))
+			output.WriteString(fmt.Sprintf("\t   Example: %s\n", def.Example))
 		}
 
-		// Add synonyms if enabled and available
 		if config.IncludeSynonyms && len(def.Synonyms) > 0 {
-			details.WriteString(fmt.Sprintf("\t\t%s %d Synonyms: %s\n", capitalized, i+1, formatWordList(def.Synonyms)))
+			output.WriteString(fmt.Sprintf("\t   Synonyms: %s\n", strings.Join(def.Synonyms, ", ")))
 		}
 
-		// Add antonyms if enabled and available
 		if config.IncludeAntonyms && len(def.Antonyms) > 0 {
-			details.WriteString(fmt.Sprintf("\t\t%s %d Antonyms: %s\n", capitalized, i+1, formatWordList(def.Antonyms)))
+			output.WriteString(fmt.Sprintf("\t   Antonyms: %s\n", strings.Join(def.Antonyms, ", ")))
 		}
 	}
 
-	return details.String()
+	return output.String()
 }
 
-// Sets up logging to write to a log file
-func setupLogging() {
-	// Create or open log file
-	var err error
-	logFile, err = os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		fmt.Println("Failed to open log file:", err)
-		return
-	}
-
-	// Configure log package to write to the file
-	log.SetOutput(logFile)
-	log.SetFlags(log.LstdFlags)
-}
-
-// Prints dynamic progress monitoring info with clear formatting
 func printProgress(stage string, item string, current, total int) {
 	percentage := int((float64(current) / float64(total)) * 100)
-	// Log progress to file
-	log.Printf("%s: %s (%d of %d) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
-
-	// Clear the entire line before printing new progress
-	fmt.Printf("\r%-80s", " ") // Clear previous content with spaces
-	fmt.Printf("\r%s: %s (%d of %d) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
+	fmt.Printf("\r%-80s", " ") // Clear line
+	fmt.Printf("\r%s: %s (%d of %d) - %d%%", stage, capitalizePhrase(item), current, total, percentage)
 }
 
-// Categorizes text based on linguistic features
+func setupLogging() {
+	var err error
+	logFile, err = os.OpenFile("log.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err == nil {
+		log.SetOutput(logFile)
+		log.SetFlags(log.LstdFlags)
+	}
+}
+
 func categorizeText(inputFile string) error {
 	baseFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
 	outputDir := baseFileName
 
-	// Create the output directory
+	// Create output directory
 	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create output directory: %v", err)
+		return err
 	}
 
-	// Open the input file
+	// Read input file
 	file, err := os.Open(inputFile)
 	if err != nil {
-		return fmt.Errorf("failed to open input file: %v", err)
+		return err
 	}
 	defer file.Close()
 
-	// Read file content
 	scanner := bufio.NewScanner(file)
 	var content string
 	for scanner.Scan() {
 		content += scanner.Text() + " "
 	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("error reading input file: %v", err)
-	}
 
 	// Create NLP document
 	doc, err := prose.NewDocument(content)
 	if err != nil {
-		return fmt.Errorf("error creating Prose document: %v", err)
+		return err
 	}
 
-	// Define output files
-	categoryFiles := map[string]string{
-		"Nouns":      baseFileName + "_Nouns.txt",
-		"Verbs":      baseFileName + "_Verbs.txt",
-		"Adjectives": baseFileName + "_Adjectives.txt",
-		"Adverbs":    baseFileName + "_Adverbs.txt",
-		"OtherWords": baseFileName + "_OtherWords.txt",
+	// Define categories and files
+	categories := map[string]string{
+		"Nouns":      filepath.Join(outputDir, baseFileName+"_Nouns.txt"),
+		"Verbs":      filepath.Join(outputDir, baseFileName+"_Verbs.txt"),
+		"Adjectives": filepath.Join(outputDir, baseFileName+"_Adjectives.txt"),
+		"Adverbs":    filepath.Join(outputDir, baseFileName+"_Adverbs.txt"),
+		"OtherWords": filepath.Join(outputDir, baseFileName+"_OtherWords.txt"),
 	}
 
 	explanationFiles := map[string]string{}
-	for category, file := range categoryFiles {
+	for category, file := range categories {
 		explanationFiles[category] = strings.Replace(file, ".txt", "_ex.txt", 1)
 	}
 
-	categorizedContent := map[string][]string{}
+	categorizedWords := map[string][]string{}
 	allWords := map[string]int{}
 
-	// Process tokens for classification
+	// Process tokens
 	tokens := doc.Tokens()
 	totalTokens := len(tokens)
 	log.Println("Starting text classification...")
@@ -641,7 +464,7 @@ func categorizeText(inputFile string) error {
 				default:
 					category = "OtherWords"
 				}
-				categorizedContent[category] = append(categorizedContent[category], part)
+				categorizedWords[category] = append(categorizedWords[category], part)
 			}
 		}
 	}
@@ -656,14 +479,14 @@ func categorizeText(inputFile string) error {
 	// Track progress across all words being processed
 	wordCounter := 0
 	totalWordsToProcess := 0
-	for _, words := range categorizedContent {
+	for _, words := range categorizedWords {
 		totalWordsToProcess += len(countFrequencies(words)) // Count unique words per category
 	}
 
 	// Write categorized content to individual files
-	for category, words := range categorizedContent {
-		filePath := filepath.Join(outputDir, categoryFiles[category])
-		exFilePath := filepath.Join(outputDir, explanationFiles[category])
+	for category, words := range categorizedWords {
+		filePath := categories[category]
+		exFilePath := explanationFiles[category]
 
 		wordFile, err := os.Create(filePath)
 		if err != nil {
