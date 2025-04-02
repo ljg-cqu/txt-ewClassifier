@@ -4,6 +4,7 @@ go 1.24.1
 
 require (
 	github.com/jdkato/prose/v2 v2.0.0
+	github.com/mattn/go-sqlite3 v1.14.25
 	github.com/sqweek/dialog v0.0.0-20240226140203-065105509627
 )
 
