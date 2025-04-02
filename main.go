@@ -1,34 +1,3 @@
-/*
-   TextLinguisticAnalyzer: A comprehensive Go program for linguistic analysis with local dictionary caching.
-
-   Description:
-   This program analyzes text files, categorizes words by parts of speech, and provides
-   detailed word explanations using the Free Dictionary API. It implements a local
-   JSON-based cache to improve performance and reduce API calls.
-
-   Features:
-   - Categorizes words by linguistic function (nouns, verbs, adjectives, adverbs)
-   - Provides detailed word explanations from Free Dictionary API
-   - Stores word definitions in a local JSON file (LocalFreeDictionary.json)
-   - Queries local cache before making remote API requests
-   - Handles slash-separated words as separate entries
-   - Generates multiple output files for different word categories
-   - Formats word definitions in a readable, numbered format
-   - Tracks query progress with clear status updates
-   - Organizes output in separate text files with proper formatting
-
-   Workflow:
-   1. User selects an input text file via GUI dialog
-   2. Program classifies words by part of speech using NLP
-   3. For each word requiring an explanation:
-      a. First checks local cache for existing definitions
-      b. If not found locally, queries the Free Dictionary API
-      c. Stores new definitions in the local cache
-   4. Outputs categorized words and explanations to files
-   5. Generates comprehensive "_AllWords.txt" and "_AllWords_ex.txt" files
-   6. Displays completion confirmation dialog
-*/
-
 package main
 
 import (
@@ -41,32 +10,44 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"unicode"
 
 	"github.com/jdkato/prose/v2"
 	"github.com/sqweek/dialog"
+	"gopkg.in/yaml.v2"
 )
 
-const (
-	// The filename for the local dictionary cache
-	DictionaryCacheFile = "LocalFreeDictionary.json"
-)
-
-// Structure to hold word definitions
-type WordDefinition struct {
-	Word          string `json:"word"`
-	DefinitionNum int    `json:"definition_number"`
-	PartOfSpeech  string `json:"part_of_speech"`
-	Definition    string `json:"definition"`
-	Example       string `json:"example,omitempty"`
+// Configuration structure for output options
+type OutputConfig struct {
+	IncludePhonetic bool `yaml:"includePhonetic"`
+	IncludeOrigin   bool `yaml:"includeOrigin"`
+	IncludeSynonyms bool `yaml:"includeSynonyms"`
+	IncludeAntonyms bool `yaml:"includeAntonyms"`
+	FilterNoExample bool `yaml:"filterDefinitionsWithoutExamples"`
 }
 
-// Structure to hold the dictionary cache
-type DictionaryCache struct {
-	Definitions map[string][]WordDefinition `json:"definitions"`
-	mutex       sync.RWMutex
+// Cache structure to store API responses
+type WordCache struct {
+	Definitions []Definition
+	Phonetic    string
+	Origin      string
+	Synonyms    []string
+	Antonyms    []string
 }
+
+// Definition structure to store word definitions
+type Definition struct {
+	PartOfSpeech string
+	Definition   string
+	Example      string
+	Synonyms     []string
+	Antonyms     []string
+}
+
+// Global variables for configuration and cache
+var config OutputConfig
+var wordCache map[string]WordCache = make(map[string]WordCache)
+var cachePath string = "word_cache.json"
 
 // Helper function to verify English text validity
 func isEnglishText(text string) bool {
@@ -131,177 +112,277 @@ func sortByFrequency(counts map[string]int) []string {
 	return sortedItems
 }
 
-// Initialize the dictionary cache
-func initDictionaryCache() (*DictionaryCache, error) {
-	cache := &DictionaryCache{
-		Definitions: make(map[string][]WordDefinition),
+// Load configuration from YAML file
+func loadConfig() OutputConfig {
+	defaultConfig := OutputConfig{
+		IncludePhonetic: false,
+		IncludeOrigin:   false,
+		IncludeSynonyms: false,
+		IncludeAntonyms: false,
+		FilterNoExample: false,
 	}
 
-	// Check if the cache file exists
-	if _, err := os.Stat(DictionaryCacheFile); os.IsNotExist(err) {
-		// File doesn't exist, return empty cache
-		return cache, nil
-	}
-
-	// Read and parse the cache file
-	data, err := ioutil.ReadFile(DictionaryCacheFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read cache file: %v", err)
-	}
-
-	if err := json.Unmarshal(data, &cache.Definitions); err != nil {
-		return nil, fmt.Errorf("failed to parse cache file: %v", err)
-	}
-
-	return cache, nil
-}
-
-// Save the dictionary cache to disk
-func (cache *DictionaryCache) Save() error {
-	cache.mutex.RLock()
-	defer cache.mutex.RUnlock()
-
-	// Marshal the definitions to JSON
-	data, err := json.MarshalIndent(cache.Definitions, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal cache: %v", err)
-	}
-
-	// Write to the cache file
-	if err := ioutil.WriteFile(DictionaryCacheFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write cache file: %v", err)
-	}
-
-	return nil
-}
-
-// Get word definitions from cache
-func (cache *DictionaryCache) GetDefinitions(word string) []WordDefinition {
-	cache.mutex.RLock()
-	defer cache.mutex.RUnlock()
-
-	lowerWord := strings.ToLower(word)
-	return cache.Definitions[lowerWord]
-}
-
-// Add a word definition to the cache
-func (cache *DictionaryCache) AddDefinition(def WordDefinition) {
-	cache.mutex.Lock()
-	defer cache.mutex.Unlock()
-
-	lowerWord := strings.ToLower(def.Word)
-	cache.Definitions[lowerWord] = append(cache.Definitions[lowerWord], def)
-}
-
-// Format definitions for a word from the cache
-func formatCachedDefinitions(word string, defs []WordDefinition) string {
-	var sb strings.Builder
-	sb.WriteString(capitalizePhrase(word) + "\n")
-
-	// Sort definitions by definition number
-	sort.Slice(defs, func(i, j int) bool {
-		return defs[i].DefinitionNum < defs[j].DefinitionNum
-	})
-
-	for _, def := range defs {
-		sb.WriteString(fmt.Sprintf("\t%s %d, %s: %s\n",
-			capitalizePhrase(word), def.DefinitionNum, def.PartOfSpeech, def.Definition))
-		if def.Example != "" {
-			sb.WriteString(fmt.Sprintf("\t\t%s %d Example: %s\n",
-				capitalizePhrase(word), def.DefinitionNum, def.Example))
+	// Check if config file exists
+	configPath := "outputConfig.yml"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Create default config file if it doesn't exist
+		yamlData, err := yaml.Marshal(defaultConfig)
+		if err != nil {
+			fmt.Println("Error creating default config:", err)
+			return defaultConfig
 		}
+		err = ioutil.WriteFile(configPath, yamlData, 0644)
+		if err != nil {
+			fmt.Println("Error writing default config file:", err)
+		}
+		return defaultConfig
 	}
 
-	return sb.String()
+	// Read and parse config file
+	yamlFile, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		fmt.Printf("Error reading config file: %v. Using defaults.\n", err)
+		return defaultConfig
+	}
+
+	var config OutputConfig
+	err = yaml.Unmarshal(yamlFile, &config)
+	if err != nil {
+		fmt.Printf("Error parsing config file: %v. Using defaults.\n", err)
+		return defaultConfig
+	}
+
+	return config
 }
 
-// Fetch word details from local cache or Free Dictionary API
-func fetchWordDetails(cache *DictionaryCache, word string) string {
-	// First check if we have this word in the local cache
-	cachedDefs := cache.GetDefinitions(word)
-	if len(cachedDefs) > 0 {
-		return formatCachedDefinitions(word, cachedDefs)
+// Load word cache from file
+func loadWordCache() {
+	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		return // No cache file exists yet
 	}
 
-	// If not found locally, query the Free Dictionary API
-	url := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", word)
-	resp, err := http.Get(url)
+	data, err := ioutil.ReadFile(cachePath)
 	if err != nil {
-		return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-	}
-	defer resp.Body.Close()
-
-	var result []map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		fmt.Println("Error reading cache file:", err)
+		return
 	}
 
+	err = json.Unmarshal(data, &wordCache)
+	if err != nil {
+		fmt.Println("Error parsing cache file:", err)
+		wordCache = make(map[string]WordCache)
+	}
+}
+
+// Save word cache to file
+func saveWordCache() {
+	data, err := json.MarshalIndent(wordCache, "", "  ")
+	if err != nil {
+		fmt.Println("Error serializing cache:", err)
+		return
+	}
+
+	err = ioutil.WriteFile(cachePath, data, 0644)
+	if err != nil {
+		fmt.Println("Error writing cache file:", err)
+	}
+}
+
+// Check if word exists in cache
+func checkCache(word string) (WordCache, bool) {
+	cached, exists := wordCache[strings.ToLower(word)]
+	return cached, exists
+}
+
+// Format a list of words for output
+func formatWordList(words []string) string {
+	if len(words) == 0 {
+		return ""
+	}
+	return strings.Join(words, ", ")
+}
+
+// Fetch word explanations using the Free Dictionary API
+func fetchWordDetails(word string) string {
+	// Check cache first
+	cachedData, exists := checkCache(word)
+	if !exists {
+		// Fetch from API if not in cache
+		url := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", strings.ToLower(word))
+		resp, err := http.Get(url)
+		if err != nil {
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+		defer resp.Body.Close()
+
+		var result []map[string]interface{}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		}
+
+		// Process API response into our cache structure
+		cachedData = WordCache{
+			Definitions: []Definition{},
+			Phonetic:    "",
+			Origin:      "",
+			Synonyms:    []string{},
+			Antonyms:    []string{},
+		}
+
+		// Extract phonetic if available
+		if len(result) > 0 {
+			if phonetic, ok := result[0]["phonetic"].(string); ok {
+				cachedData.Phonetic = phonetic
+			}
+
+			// Try to find phonetics array if direct phonetic field is empty
+			if cachedData.Phonetic == "" {
+				if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && len(phonetics) > 0 {
+					for _, p := range phonetics {
+						if phoneticMap, ok := p.(map[string]interface{}); ok {
+							if text, ok := phoneticMap["text"].(string); ok && text != "" {
+								cachedData.Phonetic = text
+								break
+							}
+						}
+					}
+				}
+			}
+
+			// Extract origin if available
+			if origin, ok := result[0]["origin"].(string); ok {
+				cachedData.Origin = origin
+			}
+		}
+
+		// Process all definitions
+		for _, entry := range result {
+			if meanings, ok := entry["meanings"].([]interface{}); ok {
+				for _, meaning := range meanings {
+					meaningMap := meaning.(map[string]interface{})
+					partOfSpeech := meaningMap["partOfSpeech"].(string)
+
+					// Extract synonyms and antonyms at the meaning level
+					var meaningLevelSynonyms, meaningLevelAntonyms []string
+					if syns, ok := meaningMap["synonyms"].([]interface{}); ok {
+						for _, syn := range syns {
+							if synStr, ok := syn.(string); ok {
+								meaningLevelSynonyms = append(meaningLevelSynonyms, synStr)
+								cachedData.Synonyms = append(cachedData.Synonyms, synStr)
+							}
+						}
+					}
+
+					if ants, ok := meaningMap["antonyms"].([]interface{}); ok {
+						for _, ant := range ants {
+							if antStr, ok := ant.(string); ok {
+								meaningLevelAntonyms = append(meaningLevelAntonyms, antStr)
+								cachedData.Antonyms = append(cachedData.Antonyms, antStr)
+							}
+						}
+					}
+
+					// Process definitions
+					if definitions, ok := meaningMap["definitions"].([]interface{}); ok {
+						for _, def := range definitions {
+							defMap := def.(map[string]interface{})
+							definitionText := defMap["definition"].(string)
+
+							// Extract example if available
+							example := ""
+							if ex, ok := defMap["example"].(string); ok {
+								example = ex
+							}
+
+							// Extract definition level synonyms and antonyms
+							var defSynonyms, defAntonyms []string
+							if syns, ok := defMap["synonyms"].([]interface{}); ok {
+								for _, syn := range syns {
+									if synStr, ok := syn.(string); ok {
+										defSynonyms = append(defSynonyms, synStr)
+										cachedData.Synonyms = append(cachedData.Synonyms, synStr)
+									}
+								}
+							}
+
+							if ants, ok := defMap["antonyms"].([]interface{}); ok {
+								for _, ant := range ants {
+									if antStr, ok := ant.(string); ok {
+										defAntonyms = append(defAntonyms, antStr)
+										cachedData.Antonyms = append(cachedData.Antonyms, antStr)
+									}
+								}
+							}
+
+							// Add definition with combined synonyms and antonyms
+							allSyns := append(defSynonyms, meaningLevelSynonyms...)
+							allAnts := append(defAntonyms, meaningLevelAntonyms...)
+
+							cachedData.Definitions = append(cachedData.Definitions, Definition{
+								PartOfSpeech: partOfSpeech,
+								Definition:   definitionText,
+								Example:      example,
+								Synonyms:     allSyns,
+								Antonyms:     allAnts,
+							})
+						}
+					}
+				}
+			}
+		}
+
+		// Add to cache for future use
+		wordCache[strings.ToLower(word)] = cachedData
+		// Save cache after each new word
+		saveWordCache()
+	}
+
+	// Format the word details based on cached data and configuration
 	var details strings.Builder
-	// Start with the word name on its own line
-	details.WriteString(capitalizePhrase(word) + "\n")
 
-	wordNumber := 1
-	for _, entry := range result {
-		meanings, ok := entry["meanings"].([]interface{})
-		if !ok {
+	// Add word name and phonetic (if enabled)
+	capitalized := capitalizePhrase(word)
+	if config.IncludePhonetic && cachedData.Phonetic != "" {
+		details.WriteString(fmt.Sprintf("%s %s\n", capitalized, cachedData.Phonetic))
+	} else {
+		details.WriteString(capitalized + "\n")
+	}
+
+	// Add origin if enabled
+	if config.IncludeOrigin && cachedData.Origin != "" {
+		details.WriteString(fmt.Sprintf("\t%s Origin: %s\n", capitalized, cachedData.Origin))
+	}
+
+	// If no definitions available, return basic info
+	if len(cachedData.Definitions) == 0 {
+		details.WriteString("\tNo details available.\n")
+		return details.String()
+	}
+
+	// Process definitions
+	for i, def := range cachedData.Definitions {
+		// Skip definitions without examples if filtering is enabled
+		if config.FilterNoExample && def.Example == "" {
 			continue
 		}
 
-		for _, meaning := range meanings {
-			meaningMap, ok := meaning.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		// Write definition with number
+		details.WriteString(fmt.Sprintf("\t%s %d, %s: %s\n", capitalized, i+1, def.PartOfSpeech, def.Definition))
 
-			partOfSpeech, ok := meaningMap["partOfSpeech"].(string)
-			if !ok {
-				continue
-			}
-
-			definitions, ok := meaningMap["definitions"].([]interface{})
-			if !ok {
-				continue
-			}
-
-			for _, definition := range definitions {
-				defMap, ok := definition.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				definitionText, ok := defMap["definition"].(string)
-				if !ok {
-					continue
-				}
-
-				// Write to details string builder
-				details.WriteString(fmt.Sprintf("\t%s %d, %s: %s\n", capitalizePhrase(word), wordNumber, partOfSpeech, definitionText))
-
-				// Check for example
-				example, hasExample := defMap["example"].(string)
-				if hasExample {
-					details.WriteString(fmt.Sprintf("\t\t%s %d Example: %s\n", capitalizePhrase(word), wordNumber, example))
-				} else {
-					example = "" // Set empty string for storage
-				}
-
-				// Store in local cache
-				cache.AddDefinition(WordDefinition{
-					Word:          word,
-					DefinitionNum: wordNumber,
-					PartOfSpeech:  partOfSpeech,
-					Definition:    definitionText,
-					Example:       example,
-				})
-
-				wordNumber++
-			}
+		// Add example if available
+		if def.Example != "" {
+			details.WriteString(fmt.Sprintf("\t\t%s %d Example: %s\n", capitalized, i+1, def.Example))
 		}
-	}
 
-	// If no definitions were found
-	if wordNumber == 1 {
-		return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
+		// Add synonyms if enabled and available
+		if config.IncludeSynonyms && len(def.Synonyms) > 0 {
+			details.WriteString(fmt.Sprintf("\t\t%s %d Synonyms: %s\n", capitalized, i+1, formatWordList(def.Synonyms)))
+		}
+
+		// Add antonyms if enabled and available
+		if config.IncludeAntonyms && len(def.Antonyms) > 0 {
+			details.WriteString(fmt.Sprintf("\t\t%s %d Antonyms: %s\n", capitalized, i+1, formatWordList(def.Antonyms)))
+		}
 	}
 
 	return details.String()
@@ -312,19 +393,11 @@ func printProgress(stage string, item string, current, total int) {
 	percentage := int((float64(current) / float64(total)) * 100)
 	// Clear the entire line before printing new progress
 	fmt.Printf("\r%-80s", " ") // Clear previous content with spaces
-	fmt.Printf("\r%s: %s (%d of %d words) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
+	fmt.Printf("\r%s: %s (%d of %d) - %d%% Complete", stage, capitalizePhrase(item), current, total, percentage)
 }
 
 // Categorizes text based on linguistic features
 func categorizeText(inputFile string) error {
-	// Initialize the dictionary cache
-	cache, err := initDictionaryCache()
-	if err != nil {
-		return fmt.Errorf("cache initialization error: %v", err)
-	}
-	// Save cache when we're done
-	defer cache.Save()
-
 	baseFileName := strings.TrimSuffix(filepath.Base(inputFile), filepath.Ext(inputFile))
 	outputDir := baseFileName
 
@@ -405,12 +478,18 @@ func categorizeText(inputFile string) error {
 		}
 	}
 
-	fmt.Println("\nClassification complete.")
-	fmt.Println("Starting word dictionary lookups...")
+	fmt.Println("\nClassification complete. Starting dictionary lookups...")
 
 	// Get all unique words for total word count display
 	sortedAllWords := sortByFrequency(allWords)
 	totalUniqueWords := len(sortedAllWords)
+
+	// Track progress across all words being processed
+	wordCounter := 0
+	totalWordsToProcess := 0
+	for _, words := range categorizedContent {
+		totalWordsToProcess += len(countFrequencies(words)) // Count unique words per category
+	}
 
 	// Write categorized content to individual files
 	for category, words := range categorizedContent {
@@ -436,18 +515,19 @@ func categorizeText(inputFile string) error {
 
 		fmt.Printf("\nProcessing %s category (%d words):\n", category, len(sortedWords))
 
-		for idx, word := range sortedWords {
+		for i, word := range sortedWords {
 			wordWriter.WriteString(capitalizePhrase(word) + "\n")
+			wordCounter++
 			printProgress(
 				fmt.Sprintf("Dictionary lookup (%s)", category),
 				word,
-				idx+1,
+				i+1,
 				len(sortedWords))
-			exWriter.WriteString(fetchWordDetails(cache, word) + "\n")
+			exWriter.WriteString(fetchWordDetails(word) + "\n")
 		}
 		wordWriter.Flush()
 		exWriter.Flush()
-		fmt.Printf("\n- Category '%s': %d words processed\n", category, len(sortedWords))
+		fmt.Printf("\n- Category '%s' processed: %d words\n", category, len(sortedWords))
 	}
 
 	fmt.Println("\nGenerating final outputs...")
@@ -461,9 +541,9 @@ func categorizeText(inputFile string) error {
 	defer allWordsExFile.Close()
 
 	allWordsExWriter := bufio.NewWriter(allWordsExFile)
-	for idx, word := range sortedAllWords {
-		printProgress("Creating AllWords_ex.txt", word, idx+1, totalUniqueWords)
-		allWordsExWriter.WriteString(fetchWordDetails(cache, word) + "\n")
+	for i, word := range sortedAllWords {
+		printProgress("Processing All Words explanations", word, i+1, totalUniqueWords)
+		allWordsExWriter.WriteString(fetchWordDetails(word) + "\n")
 	}
 	allWordsExWriter.Flush()
 	fmt.Println("\n- AllWords_ex.txt complete")
@@ -492,6 +572,10 @@ func categorizeText(inputFile string) error {
 }
 
 func main() {
+	// Load configuration and word cache
+	config = loadConfig()
+	loadWordCache()
+
 	fmt.Println("Select the input text file:")
 	inputFile, err := dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
 	if err != nil || inputFile == "" {
