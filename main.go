@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ type OutputConfig struct {
 	FilterNoExample          bool `yaml:"filterDefinitionsWithoutExamples"`
 	GenerateExplanations     bool `yaml:"generateExplanations"`     // Toggle for explanation files
 	GenerateExampleSentences bool `yaml:"generateExampleSentences"` // Toggle for example sentences files
+	MaxExampleSentences      int  `yaml:"maxExampleSentences"`      // Maximum number of example sentences per word
 }
 
 type QueryConfig struct {
@@ -141,6 +143,7 @@ func loadConfig() OutputConfig {
 		FilterNoExample:          false,
 		GenerateExplanations:     true, // Default to true for backward compatibility
 		GenerateExampleSentences: true, // Default to true for example sentences files
+		MaxExampleSentences:      0,    // Default to 0 (no limit)
 	}
 
 	configPath := "outputConfig.yml"
@@ -515,7 +518,7 @@ func fetchWordDetails(word string) string {
 	return strings.Trim(output.String(), "\n")
 }
 
-// Function to generate example sentences file for a word
+// Function to generate example sentences file for a word with the new selection logic
 func generateExampleSentencesContent(word string) string {
 	word = strings.ToLower(word)
 
@@ -529,22 +532,54 @@ func generateExampleSentencesContent(word string) string {
 		return ""
 	}
 
-	var output strings.Builder
-	capitalized := capitalizePhrase(word)
-	output.WriteString(capitalized)
-
-	hasExamples := false
+	// Collect all example sentences for this word
+	var exampleSentences []string
 	for _, def := range cachedData.Definitions {
 		if def.Example != "" {
 			// Make sure the first letter is capitalized
 			example := capitalizeSentence(def.Example)
-			output.WriteString("\n\t" + example)
-			hasExamples = true
+			exampleSentences = append(exampleSentences, example)
 		}
 	}
 
-	if !hasExamples {
+	if len(exampleSentences) == 0 {
 		return ""
+	}
+
+	// Apply the selection logic based on MaxExampleSentences setting
+	var selectedExamples []string
+
+	// If MaxExampleSentences is 0 (no limit) or greater than/equal to available examples,
+	// use all available examples
+	if config.MaxExampleSentences <= 0 || config.MaxExampleSentences >= len(exampleSentences) {
+		selectedExamples = exampleSentences
+	} else {
+		// Need to randomly select MaxExampleSentences examples
+		// Create a copy of exampleSentences to avoid modifying the original
+		availableExamples := make([]string, len(exampleSentences))
+		copy(availableExamples, exampleSentences)
+
+		// Randomly select examples
+		selectedExamples = make([]string, 0, config.MaxExampleSentences)
+		for i := 0; i < config.MaxExampleSentences && len(availableExamples) > 0; i++ {
+			// Pick a random index
+			randIndex := rand.Intn(len(availableExamples))
+
+			// Add the example at the random index to selected examples
+			selectedExamples = append(selectedExamples, availableExamples[randIndex])
+
+			// Remove the selected example to avoid duplicates
+			availableExamples = append(availableExamples[:randIndex], availableExamples[randIndex+1:]...)
+		}
+	}
+
+	// Format the output
+	var output strings.Builder
+	capitalized := capitalizePhrase(word)
+	output.WriteString(capitalized)
+
+	for _, example := range selectedExamples {
+		output.WriteString("\n\t" + example)
 	}
 
 	return output.String()
@@ -809,6 +844,7 @@ func categorizeText(inputFile string) error {
 	// Write unknown words sorted by frequency
 	for _, wordFreq := range unknownWordsFreqList {
 		unknownWordsWriter.WriteString(capitalizePhrase(wordFreq.Word) + "\n")
+		unknownWordsWriter.WriteString(capitalizePhrase(wordFreq.Word) + "\n")
 	}
 
 	// Flush the unknown words file
@@ -921,6 +957,11 @@ func categorizeText(inputFile string) error {
 	}
 	if config.GenerateExampleSentences {
 		log.Printf("Example sentences files were generated.\n")
+		if config.MaxExampleSentences > 0 {
+			log.Printf("Example sentences were limited to a maximum of %d per word.\n", config.MaxExampleSentences)
+		} else {
+			log.Printf("No limit was applied to the number of example sentences per word.\n")
+		}
 	} else {
 		log.Printf("Example sentences files were not generated (disabled in config).\n")
 	}
@@ -936,6 +977,11 @@ func categorizeText(inputFile string) error {
 	}
 	if config.GenerateExampleSentences {
 		fmt.Printf("Example sentences files were generated.\n")
+		if config.MaxExampleSentences > 0 {
+			fmt.Printf("Example sentences were limited to a maximum of %d per word.\n", config.MaxExampleSentences)
+		} else {
+			fmt.Printf("No limit was applied to the number of example sentences per word.\n")
+		}
 	} else {
 		fmt.Printf("Example sentences files were not generated (disabled in config).\n")
 	}
@@ -945,6 +991,9 @@ func categorizeText(inputFile string) error {
 }
 
 func main() {
+	// Initialize random number generator with current time as seed
+	rand.Seed(time.Now().UnixNano())
+
 	// Setup logging
 	setupLogging()
 	defer logFile.Close()
