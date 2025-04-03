@@ -31,6 +31,10 @@ type OutputConfig struct {
 	GenerateExampleSentences bool `yaml:"generateExampleSentences"` // Toggle for example sentences files
 }
 
+type QueryConfig struct {
+	QueryForUnknownWords bool `yaml:"queryForUnknownWords"` // Whether to query unknown words
+}
+
 type ProxyConfig struct {
 	HTTPProxy  string `yaml:"httpProxy"`
 	HTTPSProxy string `yaml:"httpsProxy"`
@@ -54,9 +58,12 @@ type WordCache struct {
 
 // Global variables
 var config OutputConfig
+var queryConfig QueryConfig
 var proxyConfig ProxyConfig
 var wordCache = make(map[string]WordCache)
+var wordUnknown = make(map[string]bool)
 var cachePath = "word_cache.json"
+var unknownPath = "word_unknown.json"
 var logFile *os.File
 
 // Helper functions
@@ -155,6 +162,30 @@ func loadConfig() OutputConfig {
 	return config
 }
 
+func loadQueryConfig() QueryConfig {
+	defaultConfig := QueryConfig{
+		QueryForUnknownWords: false, // Default: don't query unknown words
+	}
+
+	configPath := "queryConfig.yml"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		yamlData, _ := yaml.Marshal(defaultConfig)
+		ioutil.WriteFile(configPath, yamlData, 0644)
+		return defaultConfig
+	}
+
+	yamlFile, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		return defaultConfig
+	}
+
+	var config QueryConfig
+	if err := yaml.Unmarshal(yamlFile, &config); err != nil {
+		return defaultConfig
+	}
+	return config
+}
+
 func loadProxyConfig() ProxyConfig {
 	defaultConfig := ProxyConfig{
 		HTTPProxy:  "",
@@ -204,6 +235,29 @@ func saveWordCache() {
 	ioutil.WriteFile(cachePath, data, 0644)
 }
 
+func loadWordUnknown() {
+	if _, err := os.Stat(unknownPath); os.IsNotExist(err) {
+		return
+	}
+
+	data, err := ioutil.ReadFile(unknownPath)
+	if err != nil {
+		return
+	}
+
+	if err := json.Unmarshal(data, &wordUnknown); err != nil {
+		wordUnknown = make(map[string]bool)
+	}
+}
+
+func saveWordUnknown() {
+	data, err := json.MarshalIndent(wordUnknown, "", "  ")
+	if err != nil {
+		return
+	}
+	ioutil.WriteFile(unknownPath, data, 0644)
+}
+
 func createHTTPClient() *http.Client {
 	transport := &http.Transport{}
 
@@ -225,131 +279,185 @@ func createHTTPClient() *http.Client {
 	}
 }
 
-func fetchWordDetails(word string) string {
+// Check if a word has details available, returns true if it has details, false if not
+func hasWordDetails(word string) bool {
 	word = strings.ToLower(word)
+
+	// Check if the word is in the cache
 	cachedData, exists := wordCache[word]
-
-	if !exists {
-		apiURL := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", word)
-
-		req, err := http.NewRequest("GET", apiURL, nil)
-		if err != nil {
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
-
-		req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-		req.Header.Add("Accept", "application/json")
-
-		client := createHTTPClient()
-		resp, err := client.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
-		defer resp.Body.Close()
-
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-
-		var result []map[string]interface{}
-		if err := json.Unmarshal(bodyBytes, &result); err != nil || len(result) == 0 {
-			return fmt.Sprintf("%s\n\tNo details available.\n", capitalizePhrase(word))
-		}
-
-		// Process API response into our cache structure
-		cachedData = WordCache{
-			Definitions: []Definition{},
-			Phonetic:    "",
-			Origin:      "",
-			Synonyms:    []string{},
-			Antonyms:    []string{},
-		}
-
-		// Extract phonetic if available
-		if phonetic, ok := result[0]["phonetic"].(string); ok {
-			cachedData.Phonetic = phonetic
-		}
-
-		// Extract phonetics
-		if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && cachedData.Phonetic == "" {
-			for _, p := range phonetics {
-				if phoneticMap, ok := p.(map[string]interface{}); ok {
-					if text, ok := phoneticMap["text"].(string); ok && text != "" {
-						cachedData.Phonetic = text
-						break
-					}
-				}
-			}
-		}
-
-		// Extract origin directly from the top level
-		if originStr, ok := result[0]["origin"].(string); ok {
-			cachedData.Origin = originStr
-		}
-
-		// Extract meanings, definitions, synonyms, antonyms
-		if meanings, ok := result[0]["meanings"].([]interface{}); ok {
-			for _, m := range meanings {
-				if meaningMap, ok := m.(map[string]interface{}); ok {
-					partOfSpeech := ""
-					if pos, ok := meaningMap["partOfSpeech"].(string); ok {
-						partOfSpeech = pos
-					}
-
-					// Extract definitions
-					if definitions, ok := meaningMap["definitions"].([]interface{}); ok {
-						for _, d := range definitions {
-							defMap, ok := d.(map[string]interface{})
-							if !ok {
-								continue
-							}
-
-							def := Definition{
-								PartOfSpeech: partOfSpeech,
-								Definition:   "",
-								Example:      "",
-								Synonyms:     []string{},
-								Antonyms:     []string{},
-							}
-
-							if defStr, ok := defMap["definition"].(string); ok {
-								def.Definition = defStr
-							}
-
-							if exampleStr, ok := defMap["example"].(string); ok {
-								def.Example = exampleStr
-							}
-
-							// Extract synonyms and antonyms
-							if syns, ok := defMap["synonyms"].([]interface{}); ok {
-								for _, syn := range syns {
-									if synStr, ok := syn.(string); ok {
-										def.Synonyms = append(def.Synonyms, synStr)
-										cachedData.Synonyms = append(cachedData.Synonyms, synStr)
-									}
-								}
-							}
-
-							if ants, ok := defMap["antonyms"].([]interface{}); ok {
-								for _, ant := range ants {
-									if antStr, ok := ant.(string); ok {
-										def.Antonyms = append(def.Antonyms, antStr)
-										cachedData.Antonyms = append(cachedData.Antonyms, antStr)
-									}
-								}
-							}
-
-							cachedData.Definitions = append(cachedData.Definitions, def)
-						}
-					}
-				}
-			}
-		}
-
-		// Save to cache
-		wordCache[strings.ToLower(word)] = cachedData
-		saveWordCache()
+	if exists && len(cachedData.Definitions) > 0 {
+		return true
 	}
 
-	// Format output with the new layout
+	return false
+}
+
+// Query the dictionary API for a word
+func queryDictionaryAPI(word string) bool {
+	apiURL := fmt.Sprintf("https://api.dictionaryapi.dev/api/v2/entries/en/%s", word)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return false
+	}
+
+	req.Header.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	req.Header.Add("Accept", "application/json")
+
+	client := createHTTPClient()
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return false
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := ioutil.ReadAll(resp.Body)
+
+	var result []map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil || len(result) == 0 {
+		return false
+	}
+
+	// Process API response into cache structure
+	cachedData := WordCache{
+		Definitions: []Definition{},
+		Phonetic:    "",
+		Origin:      "",
+		Synonyms:    []string{},
+		Antonyms:    []string{},
+	}
+
+	// Extract phonetic if available
+	if phonetic, ok := result[0]["phonetic"].(string); ok {
+		cachedData.Phonetic = phonetic
+	}
+
+	// Extract phonetics
+	if phonetics, ok := result[0]["phonetics"].([]interface{}); ok && cachedData.Phonetic == "" {
+		for _, p := range phonetics {
+			if phoneticMap, ok := p.(map[string]interface{}); ok {
+				if text, ok := phoneticMap["text"].(string); ok && text != "" {
+					cachedData.Phonetic = text
+					break
+				}
+			}
+		}
+	}
+
+	// Extract origin directly from the top level
+	if originStr, ok := result[0]["origin"].(string); ok {
+		cachedData.Origin = originStr
+	}
+
+	// Extract meanings, definitions, synonyms, antonyms
+	if meanings, ok := result[0]["meanings"].([]interface{}); ok {
+		for _, m := range meanings {
+			if meaningMap, ok := m.(map[string]interface{}); ok {
+				partOfSpeech := ""
+				if pos, ok := meaningMap["partOfSpeech"].(string); ok {
+					partOfSpeech = pos
+				}
+
+				// Extract definitions
+				if definitions, ok := meaningMap["definitions"].([]interface{}); ok {
+					for _, d := range definitions {
+						defMap, ok := d.(map[string]interface{})
+						if !ok {
+							continue
+						}
+
+						def := Definition{
+							PartOfSpeech: partOfSpeech,
+							Definition:   "",
+							Example:      "",
+							Synonyms:     []string{},
+							Antonyms:     []string{},
+						}
+
+						if defStr, ok := defMap["definition"].(string); ok {
+							def.Definition = defStr
+						}
+
+						if exampleStr, ok := defMap["example"].(string); ok {
+							def.Example = exampleStr
+						}
+
+						// Extract synonyms and antonyms
+						if syns, ok := defMap["synonyms"].([]interface{}); ok {
+							for _, syn := range syns {
+								if synStr, ok := syn.(string); ok {
+									def.Synonyms = append(def.Synonyms, synStr)
+									cachedData.Synonyms = append(cachedData.Synonyms, synStr)
+								}
+							}
+						}
+
+						if ants, ok := defMap["antonyms"].([]interface{}); ok {
+							for _, ant := range ants {
+								if antStr, ok := ant.(string); ok {
+									def.Antonyms = append(def.Antonyms, antStr)
+									cachedData.Antonyms = append(cachedData.Antonyms, antStr)
+								}
+							}
+						}
+
+						cachedData.Definitions = append(cachedData.Definitions, def)
+					}
+				}
+			}
+		}
+	}
+
+	// Save to cache if we found definitions
+	if len(cachedData.Definitions) > 0 {
+		wordCache[strings.ToLower(word)] = cachedData
+		saveWordCache()
+		return true
+	}
+
+	return false
+}
+
+// Fetches word details and returns formatted output (if available) or empty string for unknown words
+func fetchWordDetails(word string) string {
+	word = strings.ToLower(word)
+
+	// Check if the word is in the unknown words database
+	if _, isUnknown := wordUnknown[word]; isUnknown {
+		// If configured not to query unknown words, return empty string
+		if !queryConfig.QueryForUnknownWords {
+			return ""
+		}
+
+		// Try to query API for this previously unknown word
+		if !queryDictionaryAPI(word) {
+			// Still unknown, return empty string
+			return ""
+		}
+
+		// The word now has details, remove from unknown list
+		delete(wordUnknown, word)
+		saveWordUnknown()
+	}
+
+	// Check if the word is in the cache
+	cachedData, exists := wordCache[word]
+
+	// If not in cache, try to fetch from API
+	if !exists {
+		// Try to query API
+		if !queryDictionaryAPI(word) {
+			// Not found, add to unknown words and return empty
+			wordUnknown[word] = true
+			saveWordUnknown()
+			return ""
+		}
+
+		// Now it should be in cache
+		cachedData = wordCache[word]
+	}
+
+	// Format output with the layout
 	var output strings.Builder
 	capitalized := capitalizePhrase(word)
 
@@ -367,8 +475,10 @@ func fetchWordDetails(word string) string {
 
 	// Check if there are definitions available
 	if len(cachedData.Definitions) == 0 {
-		output.WriteString(fmt.Sprintf("\t%s: No details available.\n", capitalized))
-		return output.String()
+		// This shouldn't happen after our checks, but just in case
+		wordUnknown[word] = true
+		saveWordUnknown()
+		return ""
 	}
 
 	// Process definitions with the new format
@@ -402,28 +512,33 @@ func fetchWordDetails(word string) string {
 		}
 	}
 
-	return output.String()
+	return strings.Trim(output.String(), "\n")
 }
 
 // Function to generate example sentences file for a word
 func generateExampleSentencesContent(word string) string {
 	word = strings.ToLower(word)
-	cachedData, exists := wordCache[word]
 
+	// Check if the word is unknown - if so, return empty string
+	if _, isUnknown := wordUnknown[word]; isUnknown {
+		return ""
+	}
+
+	cachedData, exists := wordCache[word]
 	if !exists || len(cachedData.Definitions) == 0 {
 		return ""
 	}
 
 	var output strings.Builder
 	capitalized := capitalizePhrase(word)
-	output.WriteString(capitalized + "\n")
+	output.WriteString(capitalized)
 
 	hasExamples := false
 	for _, def := range cachedData.Definitions {
 		if def.Example != "" {
 			// Make sure the first letter is capitalized
 			example := capitalizeSentence(def.Example)
-			output.WriteString("\t" + example + "\n")
+			output.WriteString("\n\t" + example)
 			hasExamples = true
 		}
 	}
@@ -553,6 +668,9 @@ func categorizeText(inputFile string) error {
 		totalWordsToProcess += len(countFrequencies(words)) // Count unique words per category
 	}
 
+	// Map to track unknown words and their frequencies
+	uniqueUnknownWords := make(map[string]int)
+
 	// Write categorized content to individual files
 	for category, words := range categorizedWords {
 		filePath := categories[category]
@@ -598,8 +716,12 @@ func categorizeText(inputFile string) error {
 		log.Printf("\nProcessing %s category (%d words):\n", category, len(sortedWords))
 		fmt.Printf("\nProcessing %s category (%d words):\n", category, len(sortedWords))
 
+		// Track if we've written anything to the example sentences file
+		hasWrittenExamples := false
+		// Track if we've written anything to the explanation file
+		hasWrittenExplanations := false
+
 		for i, word := range sortedWords {
-			wordWriter.WriteString(capitalizePhrase(word) + "\n")
 			wordCounter++
 			printProgress(
 				fmt.Sprintf("Dictionary lookup (%s)", category),
@@ -607,16 +729,40 @@ func categorizeText(inputFile string) error {
 				i+1,
 				len(sortedWords))
 
+			// Fetch word details
+			wordDetailsText := fetchWordDetails(word)
+
+			// If word details are empty, the word is unknown
+			if wordDetailsText == "" {
+				// Track unknown words with their frequencies
+				lowerWord := strings.ToLower(word)
+				uniqueUnknownWords[lowerWord] += allWords[lowerWord]
+				continue
+			}
+
+			// Word is known, add to regular output files
+			wordWriter.WriteString(capitalizePhrase(word) + "\n")
+
 			// Only write to explanation files if the toggle is enabled
 			if config.GenerateExplanations {
-				exWriter.WriteString(fetchWordDetails(word) + "\n")
+				if hasWrittenExplanations {
+					exWriter.WriteString("\n" + wordDetailsText)
+				} else {
+					exWriter.WriteString(wordDetailsText)
+					hasWrittenExplanations = true
+				}
 			}
 
 			// Only write to example sentences files if the toggle is enabled
 			if config.GenerateExampleSentences {
 				exampleContent := generateExampleSentencesContent(word)
 				if exampleContent != "" {
-					esWriter.WriteString(exampleContent + "\n")
+					if hasWrittenExamples {
+						esWriter.WriteString("\n" + exampleContent)
+					} else {
+						esWriter.WriteString(exampleContent)
+						hasWrittenExamples = true
+					}
 				}
 			}
 		}
@@ -633,8 +779,72 @@ func categorizeText(inputFile string) error {
 		fmt.Printf("\n- Category '%s' processed: %d words\n", category, len(sortedWords))
 	}
 
+	// Sort unknown words by frequency in descending order
+	type UnknownWordFreq struct {
+		Word  string
+		Count int
+	}
+
+	var unknownWordsFreqList []UnknownWordFreq
+	for word, count := range uniqueUnknownWords {
+		if word != "" { // Skip empty words
+			unknownWordsFreqList = append(unknownWordsFreqList, UnknownWordFreq{Word: word, Count: count})
+		}
+	}
+
+	// Sort by frequency (highest first)
+	sort.Slice(unknownWordsFreqList, func(i, j int) bool {
+		return unknownWordsFreqList[i].Count > unknownWordsFreqList[j].Count
+	})
+
+	// Create UnknownWords.txt file with deduplicated content sorted by frequency
+	unknownWordsFilePath := filepath.Join(outputDir, "UnknownWords.txt")
+	unknownWordsFile, err := os.Create(unknownWordsFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create UnknownWords.txt file: %v", err)
+	}
+	defer unknownWordsFile.Close()
+	unknownWordsWriter := bufio.NewWriter(unknownWordsFile)
+
+	// Write unknown words sorted by frequency
+	for _, wordFreq := range unknownWordsFreqList {
+		unknownWordsWriter.WriteString(capitalizePhrase(wordFreq.Word) + "\n")
+	}
+
+	// Flush the unknown words file
+	unknownWordsWriter.Flush()
+	log.Println("- UnknownWords.txt complete (deduplicated and sorted by frequency)")
+	fmt.Println("- UnknownWords.txt complete (deduplicated and sorted by frequency)")
+
 	log.Println("\nGenerating final outputs...")
 	fmt.Println("\nGenerating final outputs...")
+
+	// Track known and unknown words separately
+	var knownWords []string
+
+	// Separate known and unknown words
+	for _, word := range sortedAllWords {
+		// Check if word is in our uniqueUnknownWords map
+		if _, isUnknown := uniqueUnknownWords[strings.ToLower(word)]; !isUnknown {
+			knownWords = append(knownWords, word)
+		}
+	}
+
+	// Write `_AllWords.txt` file (always created, but only with known words)
+	allWordsFilePath := filepath.Join(outputDir, baseFileName+"_AllWords.txt")
+	allWordsFile, err := os.Create(allWordsFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to create _AllWords.txt file: %v", err)
+	}
+	defer allWordsFile.Close()
+
+	allWordsWriter := bufio.NewWriter(allWordsFile)
+	for _, word := range knownWords {
+		allWordsWriter.WriteString(capitalizePhrase(word) + "\n")
+	}
+	allWordsWriter.Flush()
+	log.Println("- AllWords.txt complete")
+	fmt.Println("- AllWords.txt complete")
 
 	// Only create AllWords_ex.txt if the toggle is enabled
 	if config.GenerateExplanations {
@@ -647,9 +857,19 @@ func categorizeText(inputFile string) error {
 		defer allWordsExFile.Close()
 
 		allWordsExWriter := bufio.NewWriter(allWordsExFile)
-		for i, word := range sortedAllWords {
-			printProgress("Processing All Words explanations", word, i+1, totalUniqueWords)
-			allWordsExWriter.WriteString(fetchWordDetails(word) + "\n")
+		hasWrittenAllWordsExplanations := false
+
+		for i, word := range knownWords {
+			printProgress("Processing All Words explanations", word, i+1, len(knownWords))
+			wordDetailsText := fetchWordDetails(word)
+			if wordDetailsText != "" {
+				if hasWrittenAllWordsExplanations {
+					allWordsExWriter.WriteString("\n" + wordDetailsText)
+				} else {
+					allWordsExWriter.WriteString(wordDetailsText)
+					hasWrittenAllWordsExplanations = true
+				}
+			}
 		}
 		allWordsExWriter.Flush()
 		log.Println("\n- AllWords_ex.txt complete")
@@ -667,11 +887,18 @@ func categorizeText(inputFile string) error {
 		defer allWordsEsFile.Close()
 
 		allWordsEsWriter := bufio.NewWriter(allWordsEsFile)
-		for i, word := range sortedAllWords {
-			printProgress("Processing All Words example sentences", word, i+1, totalUniqueWords)
+		hasWrittenAllWordsExamples := false
+
+		for i, word := range knownWords {
+			printProgress("Processing All Words example sentences", word, i+1, len(knownWords))
 			exampleContent := generateExampleSentencesContent(word)
 			if exampleContent != "" {
-				allWordsEsWriter.WriteString(exampleContent + "\n")
+				if hasWrittenAllWordsExamples {
+					allWordsEsWriter.WriteString("\n" + exampleContent)
+				} else {
+					allWordsEsWriter.WriteString(exampleContent)
+					hasWrittenAllWordsExamples = true
+				}
 			}
 		}
 		allWordsEsWriter.Flush()
@@ -679,25 +906,13 @@ func categorizeText(inputFile string) error {
 		fmt.Println("\n- AllWords_es.txt complete")
 	}
 
-	// Write `_AllWords.txt` file (always created)
-	allWordsFilePath := filepath.Join(outputDir, baseFileName+"_AllWords.txt")
-	allWordsFile, err := os.Create(allWordsFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create _AllWords.txt file: %v", err)
-	}
-	defer allWordsFile.Close()
-
-	allWordsWriter := bufio.NewWriter(allWordsFile)
-	for _, word := range sortedAllWords {
-		allWordsWriter.WriteString(capitalizePhrase(word) + "\n")
-	}
-	allWordsWriter.Flush()
-	log.Println("- AllWords.txt complete")
-	fmt.Println("- AllWords.txt complete")
-
 	// Report results
+	unknownCount := len(uniqueUnknownWords)
+	knownCount := len(knownWords)
+
 	log.Printf("\n===== Analysis Results =====\n")
 	log.Printf("Total unique words after deduplication: %d\n", totalUniqueWords)
+	log.Printf("Known words: %d, Unknown words: %d\n", knownCount, unknownCount)
 	log.Printf("Results written to directory: %s\n", outputDir)
 	if config.GenerateExplanations {
 		log.Printf("Word explanation files were generated.\n")
@@ -712,6 +927,7 @@ func categorizeText(inputFile string) error {
 
 	fmt.Printf("\n===== Analysis Results =====\n")
 	fmt.Printf("Total unique words after deduplication: %d\n", totalUniqueWords)
+	fmt.Printf("Known words: %d, Unknown words: %d\n", knownCount, unknownCount)
 	fmt.Printf("Results written to directory: %s\n", outputDir)
 	if config.GenerateExplanations {
 		fmt.Printf("Word explanation files were generated.\n")
@@ -737,8 +953,10 @@ func main() {
 
 	// Load configuration and proxy settings
 	config = loadConfig()
+	queryConfig = loadQueryConfig()
 	proxyConfig = loadProxyConfig()
 	loadWordCache()
+	loadWordUnknown()
 
 	log.Println("Select the input text file:")
 	fmt.Println("Select the input text file:")
