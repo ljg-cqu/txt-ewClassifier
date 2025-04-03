@@ -22,6 +22,10 @@ import (
 )
 
 // Configuration structures
+type InputConfig struct {
+	FilePath string `yaml:"filePath"`
+}
+
 type OutputConfig struct {
 	IncludePhonetic          bool `yaml:"includePhonetic"`
 	IncludeOrigin            bool `yaml:"includeOrigin"`
@@ -134,6 +138,31 @@ func sortByFrequency(counts map[string]int) []string {
 }
 
 // Configuration loading
+func loadInputConfig() InputConfig {
+	defaultConfig := InputConfig{
+		FilePath: "", // Default to empty string (will trigger GUI selection)
+	}
+
+	configPath := "inputConfig.yml"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Create default config file if it doesn't exist
+		yamlData, _ := yaml.Marshal(defaultConfig)
+		ioutil.WriteFile(configPath, yamlData, 0644)
+		return defaultConfig
+	}
+
+	yamlFile, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		return defaultConfig
+	}
+
+	var config InputConfig
+	if err := yaml.Unmarshal(yamlFile, &config); err != nil {
+		return defaultConfig
+	}
+	return config
+}
+
 func loadConfig() OutputConfig {
 	defaultConfig := OutputConfig{
 		IncludePhonetic:          false,
@@ -1007,13 +1036,43 @@ func main() {
 	loadWordCache()
 	loadWordUnknown()
 
-	log.Println("Select the input text file:")
-	fmt.Println("Select the input text file:")
-	inputFile, err := dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
-	if err != nil || inputFile == "" {
-		log.Println("No file selected or error occurred.")
-		fmt.Println("No file selected or error occurred.")
-		return
+	// Load input configuration
+	inputConfig := loadInputConfig()
+
+	var inputFile string
+	var err error
+
+	// Check if the input file path is configured and valid
+	if inputConfig.FilePath != "" {
+		// Check if the file exists and is readable
+		if _, err := os.Stat(inputConfig.FilePath); err == nil {
+			log.Println("Using configured input file:", inputConfig.FilePath)
+			fmt.Println("Using configured input file:", inputConfig.FilePath)
+			inputFile = inputConfig.FilePath
+		} else {
+			log.Println("Configured input file not found or not accessible:", inputConfig.FilePath)
+			fmt.Println("Configured input file not found or not accessible:", inputConfig.FilePath)
+			log.Println("Falling back to file selection dialog")
+			fmt.Println("Falling back to file selection dialog")
+
+			// Fall back to GUI selection
+			inputFile, err = dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
+			if err != nil || inputFile == "" {
+				log.Println("No file selected or error occurred.")
+				fmt.Println("No file selected or error occurred.")
+				return
+			}
+		}
+	} else {
+		// No input file configured, use GUI selection as before
+		log.Println("Select the input text file:")
+		fmt.Println("Select the input text file:")
+		inputFile, err = dialog.File().Title("Select Input File").Filter("Text Files (*.txt)", "txt").Load()
+		if err != nil || inputFile == "" {
+			log.Println("No file selected or error occurred.")
+			fmt.Println("No file selected or error occurred.")
+			return
+		}
 	}
 
 	err = categorizeText(inputFile)
