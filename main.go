@@ -22,12 +22,13 @@ import (
 
 // Configuration structures
 type OutputConfig struct {
-	IncludePhonetic      bool `yaml:"includePhonetic"`
-	IncludeOrigin        bool `yaml:"includeOrigin"`
-	IncludeSynonyms      bool `yaml:"includeSynonyms"`
-	IncludeAntonyms      bool `yaml:"includeAntonyms"`
-	FilterNoExample      bool `yaml:"filterDefinitionsWithoutExamples"`
-	GenerateExplanations bool `yaml:"generateExplanations"` // New toggle option
+	IncludePhonetic          bool `yaml:"includePhonetic"`
+	IncludeOrigin            bool `yaml:"includeOrigin"`
+	IncludeSynonyms          bool `yaml:"includeSynonyms"`
+	IncludeAntonyms          bool `yaml:"includeAntonyms"`
+	FilterNoExample          bool `yaml:"filterDefinitionsWithoutExamples"`
+	GenerateExplanations     bool `yaml:"generateExplanations"`     // Toggle for explanation files
+	GenerateExampleSentences bool `yaml:"generateExampleSentences"` // Toggle for example sentences files
 }
 
 type ProxyConfig struct {
@@ -81,6 +82,13 @@ func capitalizePhrase(phrase string) string {
 	return strings.Join(words, " ")
 }
 
+func capitalizeSentence(sentence string) string {
+	if len(sentence) == 0 {
+		return ""
+	}
+	return strings.ToUpper(string(sentence[0])) + sentence[1:]
+}
+
 func splitSlashSeparatedWords(text string) []string {
 	parts := strings.Split(text, "/")
 	for i, part := range parts {
@@ -119,12 +127,13 @@ func sortByFrequency(counts map[string]int) []string {
 // Configuration loading
 func loadConfig() OutputConfig {
 	defaultConfig := OutputConfig{
-		IncludePhonetic:      false,
-		IncludeOrigin:        false,
-		IncludeSynonyms:      false,
-		IncludeAntonyms:      false,
-		FilterNoExample:      false,
-		GenerateExplanations: true, // Default to true for backward compatibility
+		IncludePhonetic:          false,
+		IncludeOrigin:            false,
+		IncludeSynonyms:          false,
+		IncludeAntonyms:          false,
+		FilterNoExample:          false,
+		GenerateExplanations:     true, // Default to true for backward compatibility
+		GenerateExampleSentences: true, // Default to true for example sentences files
 	}
 
 	configPath := "outputConfig.yml"
@@ -396,6 +405,36 @@ func fetchWordDetails(word string) string {
 	return output.String()
 }
 
+// Function to generate example sentences file for a word
+func generateExampleSentencesContent(word string) string {
+	word = strings.ToLower(word)
+	cachedData, exists := wordCache[word]
+
+	if !exists || len(cachedData.Definitions) == 0 {
+		return ""
+	}
+
+	var output strings.Builder
+	capitalized := capitalizePhrase(word)
+	output.WriteString(capitalized + "\n")
+
+	hasExamples := false
+	for _, def := range cachedData.Definitions {
+		if def.Example != "" {
+			// Make sure the first letter is capitalized
+			example := capitalizeSentence(def.Example)
+			output.WriteString("\t" + example + "\n")
+			hasExamples = true
+		}
+	}
+
+	if !hasExamples {
+		return ""
+	}
+
+	return output.String()
+}
+
 func printProgress(stage string, item string, current, total int) {
 	percentage := int((float64(current) / float64(total)) * 100)
 	fmt.Printf("\r%-80s", " ") // Clear line
@@ -449,10 +488,19 @@ func categorizeText(inputFile string) error {
 	}
 
 	explanationFiles := map[string]string{}
+	exampleSentencesFiles := map[string]string{}
+
 	// Only create explanation file maps if the toggle is enabled
 	if config.GenerateExplanations {
 		for category, file := range categories {
 			explanationFiles[category] = strings.Replace(file, ".txt", "_ex.txt", 1)
+		}
+	}
+
+	// Only create example sentences file maps if the toggle is enabled
+	if config.GenerateExampleSentences {
+		for category, file := range categories {
+			exampleSentencesFiles[category] = strings.Replace(file, ".txt", "_es.txt", 1)
 		}
 	}
 
@@ -520,6 +568,9 @@ func categorizeText(inputFile string) error {
 		var exFile *os.File
 		var exWriter *bufio.Writer
 
+		var esFile *os.File
+		var esWriter *bufio.Writer
+
 		// Only create explanation files if the toggle is enabled
 		if config.GenerateExplanations {
 			exFilePath := explanationFiles[category]
@@ -529,6 +580,17 @@ func categorizeText(inputFile string) error {
 			}
 			defer exFile.Close()
 			exWriter = bufio.NewWriter(exFile)
+		}
+
+		// Only create example sentences files if the toggle is enabled
+		if config.GenerateExampleSentences {
+			esFilePath := exampleSentencesFiles[category]
+			esFile, err = os.Create(esFilePath)
+			if err != nil {
+				return fmt.Errorf("failed to create example sentences file for %s: %v", category, err)
+			}
+			defer esFile.Close()
+			esWriter = bufio.NewWriter(esFile)
 		}
 
 		sortedWords := sortByFrequency(countFrequencies(words))
@@ -549,11 +611,22 @@ func categorizeText(inputFile string) error {
 			if config.GenerateExplanations {
 				exWriter.WriteString(fetchWordDetails(word) + "\n")
 			}
+
+			// Only write to example sentences files if the toggle is enabled
+			if config.GenerateExampleSentences {
+				exampleContent := generateExampleSentencesContent(word)
+				if exampleContent != "" {
+					esWriter.WriteString(exampleContent + "\n")
+				}
+			}
 		}
 
 		wordWriter.Flush()
 		if config.GenerateExplanations {
 			exWriter.Flush()
+		}
+		if config.GenerateExampleSentences {
+			esWriter.Flush()
 		}
 
 		log.Printf("\n- Category '%s' processed: %d words\n", category, len(sortedWords))
@@ -583,6 +656,29 @@ func categorizeText(inputFile string) error {
 		fmt.Println("\n- AllWords_ex.txt complete")
 	}
 
+	// Only create AllWords_es.txt if the toggle is enabled
+	if config.GenerateExampleSentences {
+		// Write `_AllWords_es.txt` file
+		allWordsEsFilePath := filepath.Join(outputDir, baseFileName+"_AllWords_es.txt")
+		allWordsEsFile, err := os.Create(allWordsEsFilePath)
+		if err != nil {
+			return fmt.Errorf("failed to create _AllWords_es.txt file: %v", err)
+		}
+		defer allWordsEsFile.Close()
+
+		allWordsEsWriter := bufio.NewWriter(allWordsEsFile)
+		for i, word := range sortedAllWords {
+			printProgress("Processing All Words example sentences", word, i+1, totalUniqueWords)
+			exampleContent := generateExampleSentencesContent(word)
+			if exampleContent != "" {
+				allWordsEsWriter.WriteString(exampleContent + "\n")
+			}
+		}
+		allWordsEsWriter.Flush()
+		log.Println("\n- AllWords_es.txt complete")
+		fmt.Println("\n- AllWords_es.txt complete")
+	}
+
 	// Write `_AllWords.txt` file (always created)
 	allWordsFilePath := filepath.Join(outputDir, baseFileName+"_AllWords.txt")
 	allWordsFile, err := os.Create(allWordsFilePath)
@@ -608,6 +704,11 @@ func categorizeText(inputFile string) error {
 	} else {
 		log.Printf("Word explanation files were not generated (disabled in config).\n")
 	}
+	if config.GenerateExampleSentences {
+		log.Printf("Example sentences files were generated.\n")
+	} else {
+		log.Printf("Example sentences files were not generated (disabled in config).\n")
+	}
 
 	fmt.Printf("\n===== Analysis Results =====\n")
 	fmt.Printf("Total unique words after deduplication: %d\n", totalUniqueWords)
@@ -616,6 +717,11 @@ func categorizeText(inputFile string) error {
 		fmt.Printf("Word explanation files were generated.\n")
 	} else {
 		fmt.Printf("Word explanation files were not generated (disabled in config).\n")
+	}
+	if config.GenerateExampleSentences {
+		fmt.Printf("Example sentences files were generated.\n")
+	} else {
+		fmt.Printf("Example sentences files were not generated (disabled in config).\n")
 	}
 	log.Println("Text analysis complete.")
 
